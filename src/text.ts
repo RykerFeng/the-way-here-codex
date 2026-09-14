@@ -51,13 +51,13 @@ export function chunkText(value: string, targetCharacters = 1_200): TextChunk[] 
       const level = heading[1]!.length;
       headings.length = level - 1;
       headings[level - 1] = heading[2]!.trim();
-      blocks.push({ startLine: index + 1, endLine: index + 1, content: lines[index]!.trim(), headingPath: [...headings] });
+      blocks.push({ startLine: index + 1, endLine: index + 1, content: lines[index]!.trim(), headingPath: compactHeadingPath(headings) });
       index += 1;
       continue;
     }
     while (index + 1 < lines.length && lines[index + 1]!.trim() && !/^#{1,6}\s+/.test(lines[index + 1]!.trim())) index += 1;
     const content = lines.slice(start, index + 1).join("\n").trim();
-    blocks.push(...splitBlock({ startLine: start + 1, endLine: index + 1, content, headingPath: [...headings] }, targetCharacters));
+    blocks.push(...splitBlock({ startLine: start + 1, endLine: index + 1, content, headingPath: compactHeadingPath(headings) }, targetCharacters));
     index += 1;
   }
 
@@ -76,6 +76,10 @@ export function chunkText(value: string, targetCharacters = 1_200): TextChunk[] 
   }
   if (current) chunks.push({ ordinal: chunks.length, startLine: current.startLine, endLine: current.endLine, content: current.parts.join("\n\n"), headingPath: current.headingPath });
   return chunks;
+}
+
+function compactHeadingPath(headings: string[]): string[] {
+  return headings.filter((heading, index) => heading && heading !== headings[index - 1]);
 }
 
 function splitBlock(block: TextBlock, targetCharacters: number): TextBlock[] {

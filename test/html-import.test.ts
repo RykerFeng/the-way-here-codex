@@ -55,4 +55,27 @@ test("uses reader content for an article page", () => {
   assert.match(parsed.content, /第一段解释/);
   assert.match(parsed.content, /第三段建议/);
   assert.doesNotMatch(parsed.content, /首页 新闻|推荐阅读|隐私政策/);
+  assert.match(parsed.content, /^# 如何整理个人资料\n/);
+});
+
+test("removes documentation table-of-contents chrome", () => {
+  const html = `<!doctype html>
+    <html>
+      <head><title>Knowledge | Example Docs</title></head>
+      <body>
+        <main>
+          <div class="theme-doc-toc-mobile">On this page Install Configure</div>
+          <article>
+            <h1>Knowledge</h1>
+            <p>Focused Retrieval uses RAG to find the most relevant chunks.</p>
+          </article>
+          <nav class="pagination-nav">Previous Next</nav>
+        </main>
+      </body>
+    </html>`;
+
+  const parsed = extractHtmlContent(html, "https://example.com/docs/knowledge");
+
+  assert.match(parsed.content, /Focused Retrieval/);
+  assert.doesNotMatch(parsed.content, /On this page|Previous Next/);
 });

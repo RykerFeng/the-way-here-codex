@@ -3,7 +3,14 @@ import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { meaningfulQueryTokens } from "../src/retrieval.js";
 import { MemoryStore } from "../src/store.js";
+
+test("removes Chinese question filler before tokenization", () => {
+  const tokens = meaningfulQueryTokens("OpenAI file search 怎么检索吗");
+  assert.deepEqual(new Set(tokens), new Set(["openai", "file", "search", "检索"]));
+  assert.equal(tokens.includes("么检"), false);
+});
 
 test("filters generic overlap instead of returning weak evidence", async () => {
   const space = await mkdtemp(path.join(os.tmpdir(), "way-here-abstain-"));
@@ -63,6 +70,25 @@ test("limits one source to two results in a fused answer", async () => {
     for (const hit of hits) counts.set(hit.sourceId, (counts.get(hit.sourceId) ?? 0) + 1);
     assert.ok([...counts.values()].every((count) => count <= 2));
     assert.equal(new Set(hits.map((hit) => hit.origin)).has("short.md"), true);
+  } finally {
+    store.close();
+  }
+});
+
+test("a source name cannot substitute for missing subject evidence", async () => {
+  const space = await mkdtemp(path.join(os.tmpdir(), "way-here-subject-"));
+  const store = await MemoryStore.open(space);
+  try {
+    const source = store.importDocument({
+      kind: "web", origin: "https://example.com/openai-file-search", title: "File search | OpenAI API",
+      content: "# File search | OpenAI API\n\nSemantic and keyword search retrieve information from uploaded files.\n\n## Metadata filtering\n\nFilter results by category and date.",
+    });
+
+    const hits = store.query(["OpenAI file search semantic keyword"], 5);
+
+    assert.equal(hits[0]?.sourceId, source.source.id);
+    assert.match(hits[0]?.excerpt ?? "", /Semantic and keyword/);
+    assert.equal(hits.some((hit) => hit.headingPath.includes("Metadata filtering")), false);
   } finally {
     store.close();
   }

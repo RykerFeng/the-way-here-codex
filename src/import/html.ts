@@ -17,6 +17,8 @@ const removableSelector = [
   "nav", "header", "footer", "aside", "dialog", "form",
   "[hidden]", "[aria-hidden='true']", "[role='navigation']", "[role='banner']",
   "[role='contentinfo']", "[role='complementary']",
+  ".table-of-contents", ".theme-doc-toc-mobile", ".theme-doc-breadcrumbs",
+  ".pagination-nav", ".theme-doc-footer", "[class*='tocCollapsible']", "[class*='breadcrumbs']",
 ].join(",");
 
 export function extractHtmlContent(html: string, url = "https://example.invalid/"): HtmlContent {
@@ -44,7 +46,7 @@ export function extractHtmlContent(html: string, url = "https://example.invalid/
     .filter((item) => item.content.length > 0)
     .sort((left, right) => score(right.candidate, right.content) - score(left.candidate, left.content))[0];
 
-  const content = selected?.content ?? "";
+  const extractedContent = selected?.content ?? "";
   const selectedHeading = selected?.candidate.element.querySelector("h1")?.textContent?.trim();
   const title = selectedHeading
     || selected?.candidate.readerTitle?.trim()
@@ -52,6 +54,7 @@ export function extractHtmlContent(html: string, url = "https://example.invalid/
     || cleaned.querySelector("meta[property='og:title']")?.getAttribute("content")?.trim()
     || cleaned.title.trim()
     || "未命名网页";
+  const content = extractedContent.startsWith("# ") ? extractedContent : `# ${title}\n\n${extractedContent}`.trim();
   return { title, content };
 }
 
@@ -81,12 +84,12 @@ function structuredText(root: Element): string {
     const heading = /^H([1-6])$/.exec(element.tagName);
     if (heading) {
       const value = element.textContent?.replace(/\s+/g, " ").trim();
-      if (value) blocks.push(`${"#".repeat(Number(heading[1]))} ${value}`);
+      if (value) blocks.push("\n", `${"#".repeat(Number(heading[1]))} ${value}`, "\n");
       return;
     }
     if (element.tagName === "LI") {
       const value = element.textContent?.replace(/\s+/g, " ").trim();
-      if (value) blocks.push(`- ${value}`);
+      if (value) blocks.push("\n", `- ${value}`, "\n");
       return;
     }
     if (element.tagName === "BR") {
@@ -94,6 +97,7 @@ function structuredText(root: Element): string {
       return;
     }
     if (blockTags.has(element.tagName)) {
+      blocks.push("\n");
       const before = blocks.length;
       element.childNodes.forEach(visit);
       if (blocks.length > before) blocks.push("\n");
