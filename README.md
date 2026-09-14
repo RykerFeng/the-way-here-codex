@@ -112,8 +112,6 @@ npm run typecheck
 npm run build
 ```
 
-详细取舍见 [设计文档](docs/superpowers/specs/2026-09-14-the-way-here-codex-design.md)。
-
 ## 许可证
 
 [MIT](LICENSE)
