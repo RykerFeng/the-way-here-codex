@@ -182,9 +182,9 @@ function isHttpUrl(value: string): boolean {
 
 async function requireExistingSpace(space: string): Promise<void> {
   const info = await stat(space).catch(() => null);
-  if (!info?.isDirectory()) throw new MemoryError("SPACE_NOT_FOUND", "资料空间还没有初始化。", false, `先运行 init --space ${space}`);
+  if (!info?.isDirectory()) throw new MemoryError("SPACE_NOT_FOUND", "资料空间还没有初始化。", false, `先运行 setup --space ${space}`);
   await access(path.join(space, "memory.sqlite")).catch(() => {
-    throw new MemoryError("SPACE_NOT_FOUND", "目录不是有效的资料空间。", false, `先运行 init --space ${space}`);
+    throw new MemoryError("SPACE_NOT_FOUND", "目录不是有效的资料空间。", false, `先运行 setup --space ${space}`);
   });
 }
 

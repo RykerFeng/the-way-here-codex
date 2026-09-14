@@ -157,7 +157,8 @@ export class MemoryStore {
         JOIN chunks c ON c.id = chunks_fts.chunk_id
         JOIN sources s ON s.object_hash = c.object_hash AND s.deleted_at IS NULL
         WHERE chunks_fts MATCH ?
-        LIMIT 200
+        ORDER BY rank
+        LIMIT 300
       `).all(match) as unknown as SearchRow[];
       for (const row of matched) rows.set(`${row.source_id}:${row.chunk_id}`, row);
     }
@@ -251,7 +252,7 @@ export class MemoryStore {
       FROM sources s JOIN objects o ON o.hash = s.object_hash
       WHERE s.id = ? AND s.deleted_at IS NULL
     `).get(sourceId) as (SourceRow & { content: string }) | undefined;
-    if (!row) throw new MemoryError("SOURCE_NOT_FOUND", "资料不存在或已经移除。", false, "先运行 search 找到资料 ID。 ");
+    if (!row) throw new MemoryError("SOURCE_NOT_FOUND", "资料不存在或已经移除。", false, "先运行 query 或 sources 找到资料 ID。");
     const lines = row.content.split("\n");
     const safeStart = Math.max(1, Math.min(Math.floor(startLine), lines.length));
     const safeEnd = Math.max(safeStart, Math.min(Math.floor(endLine), lines.length));
