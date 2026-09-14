@@ -9,14 +9,13 @@
   "files": [
     "dist",
     "LOAD.md",
-    "README.md",
-    "LICENSE"
+    "README.md"
   ],
   "engines": {
     "node": ">=22.19.0"
   },
   "scripts": {
-    "test": "tsx --test test/**/*.test.ts",
+    "test": "node --disable-warning=ExperimentalWarning --import tsx --test test/**/*.test.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc"
   },

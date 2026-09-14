@@ -4,7 +4,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { MemoryError } from "./errors.js";
 import { chunkText, indexTokens, queryTokens } from "./text.js";
-import type { ImportDocumentInput, ImportDocumentResult, SearchHit, SourceKind, SourceRecord, StoreStatus } from "./types.js";
+import type { ExportSnapshot, ImportDocumentInput, ImportDocumentResult, ReadSourceResult, SearchHit, SourceKind, SourceRecord, StoreStatus } from "./types.js";
 
 interface SourceRow {
   id: string;
@@ -139,15 +139,25 @@ export class MemoryStore {
       for (const row of matched) rows.set(`${row.source_id}:${row.chunk_id}`, row);
     }
 
-    const titleOrSingle = this.database.prepare(`
+    const exactContent = this.database.prepare(`
+      SELECT c.id AS chunk_id, c.object_hash, c.start_line, c.end_line, c.content,
+             s.id AS source_id, s.origin, s.title, 0 AS rank
+      FROM sources s
+      JOIN chunks c ON c.object_hash = s.object_hash
+      WHERE s.deleted_at IS NULL AND instr(lower(c.content), lower(?)) > 0
+      LIMIT 200
+    `).all(normalized) as unknown as SearchRow[];
+    for (const row of exactContent) rows.set(`${row.source_id}:${row.chunk_id}`, row);
+
+    const titleMatches = this.database.prepare(`
       SELECT c.id AS chunk_id, c.object_hash, c.start_line, c.end_line, c.content,
              s.id AS source_id, s.origin, s.title, 0 AS rank
       FROM sources s
       JOIN chunks c ON c.object_hash = s.object_hash AND c.ordinal = 0
-      WHERE s.deleted_at IS NULL AND (instr(lower(s.title), lower(?)) > 0 OR instr(c.content, ?) > 0)
+      WHERE s.deleted_at IS NULL AND instr(lower(s.title), lower(?)) > 0
       LIMIT 200
-    `).all(normalized, normalized) as unknown as SearchRow[];
-    for (const row of titleOrSingle) rows.set(`${row.source_id}:${row.chunk_id}`, row);
+    `).all(normalized) as unknown as SearchRow[];
+    for (const row of titleMatches) rows.set(`${row.source_id}:${row.chunk_id}`, row);
 
     const queryIndexTokens = new Set(tokens);
     return [...rows.values()]
@@ -168,6 +178,38 @@ export class MemoryStore {
       })
       .sort((left, right) => right.score - left.score || left.title.localeCompare(right.title, "zh-CN"))
       .slice(0, Math.max(1, Math.min(limit, 30)));
+  }
+
+  readSource(sourceId: string, startLine = 1, endLine = 200): ReadSourceResult {
+    const row = this.database.prepare(`
+      SELECT s.id, s.kind, s.origin, s.title, s.object_hash, s.imported_at, s.deleted_at, o.content
+      FROM sources s JOIN objects o ON o.hash = s.object_hash
+      WHERE s.id = ? AND s.deleted_at IS NULL
+    `).get(sourceId) as (SourceRow & { content: string }) | undefined;
+    if (!row) throw new MemoryError("SOURCE_NOT_FOUND", "资料不存在或已经移除。", false, "先运行 search 找到资料 ID。 ");
+    const lines = row.content.split("\n");
+    const safeStart = Math.max(1, Math.min(Math.floor(startLine), lines.length));
+    const safeEnd = Math.max(safeStart, Math.min(Math.floor(endLine), lines.length));
+    return {
+      source: this.mapSource(row),
+      startLine: safeStart,
+      endLine: safeEnd,
+      totalLines: lines.length,
+      content: lines.slice(safeStart - 1, safeEnd).join("\n"),
+    };
+  }
+
+  exportSnapshot(): ExportSnapshot {
+    const rows = this.database.prepare(`
+      SELECT s.id, s.kind, s.origin, s.title, s.object_hash, s.imported_at, s.deleted_at, o.content
+      FROM sources s JOIN objects o ON o.hash = s.object_hash
+      WHERE s.deleted_at IS NULL ORDER BY s.imported_at, s.id
+    `).all() as unknown as Array<SourceRow & { content: string }>;
+    return {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      sources: rows.map((row) => ({ ...this.mapSource(row), content: row.content })),
+    };
   }
 
   status(): StoreStatus {

@@ -41,3 +41,17 @@ export interface SearchHit {
   endLine: number;
   score: number;
 }
+
+export interface ReadSourceResult {
+  source: SourceRecord;
+  startLine: number;
+  endLine: number;
+  totalLines: number;
+  content: string;
+}
+
+export interface ExportSnapshot {
+  version: 1;
+  exportedAt: string;
+  sources: Array<SourceRecord & { content: string }>;
+}
