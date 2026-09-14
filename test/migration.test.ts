@@ -42,9 +42,12 @@ test("opens a v1 space, preserves evidence, and upgrades its index", async () =>
     const version = migrated.prepare("PRAGMA user_version").get() as { user_version: number };
     const chunkColumns = migrated.prepare("PRAGMA table_info(chunks)").all() as Array<{ name: string }>;
     const ftsColumns = migrated.prepare("PRAGMA table_info(chunks_fts)").all() as Array<{ name: string }>;
+    const rebuilt = migrated.prepare("SELECT heading_path, start_line, end_line FROM chunks WHERE object_hash = 'hash'").get() as { heading_path: string; start_line: number; end_line: number };
     assert.equal(version.user_version, 2);
     assert.ok(chunkColumns.some((column) => column.name === "heading_path"));
     assert.ok(ftsColumns.some((column) => column.name === "heading_tokens"));
+    assert.deepEqual(JSON.parse(rebuilt.heading_path), ["旧资料"]);
+    assert.deepEqual([rebuilt.start_line, rebuilt.end_line], [1, 3]);
   } finally {
     migrated.close();
   }

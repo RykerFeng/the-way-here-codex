@@ -321,11 +321,16 @@ function migrateToV2(database: DatabaseSync): void {
     }
     if (ftsExists) database.exec("DROP TABLE chunks_fts");
     database.exec("CREATE VIRTUAL TABLE chunks_fts USING fts5(chunk_id UNINDEXED, heading_tokens, body_tokens)");
-    const chunks = database.prepare("SELECT id, content, heading_path FROM chunks").all() as Array<{ id: string; content: string; heading_path: string }>;
-    const insert = database.prepare("INSERT INTO chunks_fts(chunk_id, heading_tokens, body_tokens) VALUES (?, ?, ?)");
-    for (const chunk of chunks) {
-      const heading = parseHeadingPath(chunk.heading_path).join(" ");
-      insert.run(chunk.id, indexTokens(heading).join(" "), indexTokens(chunk.content).join(" "));
+    const objects = database.prepare("SELECT hash, content FROM objects").all() as Array<{ hash: string; content: string }>;
+    database.exec("DELETE FROM chunks");
+    const insertChunk = database.prepare("INSERT INTO chunks(id, object_hash, ordinal, start_line, end_line, content, heading_path) VALUES (?, ?, ?, ?, ?, ?, ?)");
+    const insertFts = database.prepare("INSERT INTO chunks_fts(chunk_id, heading_tokens, body_tokens) VALUES (?, ?, ?)");
+    for (const object of objects) {
+      for (const chunk of chunkText(object.content)) {
+        const chunkId = randomUUID();
+        insertChunk.run(chunkId, object.hash, chunk.ordinal, chunk.startLine, chunk.endLine, chunk.content, JSON.stringify(chunk.headingPath));
+        insertFts.run(chunkId, indexTokens(chunk.headingPath.join(" ")).join(" "), indexTokens(chunk.content).join(" "));
+      }
     }
     database.exec("PRAGMA user_version = 2; COMMIT");
   } catch (error) {
