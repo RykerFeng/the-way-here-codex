@@ -2,6 +2,7 @@
   "name": "the-way-here-codex",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "bin": {
     "the-way-here": "dist/cli.js"
@@ -9,7 +10,8 @@
   "files": [
     "dist",
     "LOAD.md",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=22.19.0"
