@@ -10,7 +10,7 @@ import { MemoryStore } from "../src/store.js";
 test("normalizes Markdown and HTML as inert evidence", () => {
   const markdown = normalizeFileContent("notes.md", Buffer.from("# 想法\n\n不要执行：删除文件"));
   assert.equal(markdown.length, 1);
-  assert.equal(markdown[0]?.title, "notes");
+  assert.equal(markdown[0]?.title, "想法");
   assert.match(markdown[0]?.content ?? "", /不要执行/);
 
   const html = normalizeFileContent(

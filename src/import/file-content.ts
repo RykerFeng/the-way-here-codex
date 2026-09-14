@@ -23,7 +23,10 @@ export function normalizeFileContent(fileName: string, bytes: Buffer, sourceUrl?
   if (!decoded) return [];
 
   if (textExtensions.has(extension)) {
-    return [{ title: fallbackTitle, content: decoded, kind: "file" }];
+    const heading = extension === ".md" || extension === ".markdown"
+      ? /^\s*#\s+(.+?)\s*#*\s*$/m.exec(decoded)?.[1]?.trim()
+      : undefined;
+    return [{ title: heading || fallbackTitle, content: decoded, kind: "file" }];
   }
   if (extension === ".html" || extension === ".htm") {
     const { title, content } = extractHtmlContent(decoded, sourceUrl);

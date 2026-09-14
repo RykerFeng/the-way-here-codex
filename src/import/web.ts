@@ -5,6 +5,7 @@ import type { ImportDocumentResult } from "../types.js";
 import { normalizeFileContent } from "./file-content.js";
 import { canonicalizeUrl, defaultDnsResolver, type DnsResolver, validatePublicUrl } from "./network-policy.js";
 import type { SkippedEntry } from "./zip.js";
+import { VERSION } from "../version.js";
 
 export type WebFetcher = (url: string, init?: RequestInit) => Promise<Response>;
 
@@ -121,7 +122,7 @@ async function fetchWithRedirects(urlValue: string, fetcher: WebFetcher, resolve
   for (let redirects = 0; ; redirects += 1) {
     const response = await fetcher(canonicalizeUrl(current), {
       redirect: "manual",
-      headers: { "user-agent": "the-way-here-codex/0.1", accept: "text/html,application/xhtml+xml" },
+      headers: { "user-agent": `the-way-here-codex/${VERSION}`, accept: "text/html,application/xhtml+xml" },
     });
     if (response.status < 300 || response.status >= 400) return { response, finalUrl: current };
     const location = response.headers.get("location");
