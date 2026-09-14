@@ -40,6 +40,9 @@ export interface SearchHit {
   startLine: number;
   endLine: number;
   headingPath: string[];
+  coverage: number;
+  exact: boolean;
+  matchedQueries: string[];
   score: number;
 }
 

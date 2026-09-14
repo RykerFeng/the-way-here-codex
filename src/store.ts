@@ -3,7 +3,8 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { MemoryError } from "./errors.js";
-import { chunkText, indexTokens, queryTokens } from "./text.js";
+import { evidenceExcerpt, meaningfulQueryTokens, normalizeQuery, scoreCandidate } from "./retrieval.js";
+import { chunkText, indexTokens } from "./text.js";
 import type { ExportSnapshot, ImportDocumentInput, ImportDocumentResult, ReadSourceResult, SearchHit, SourceKind, SourceRecord, StoreStatus } from "./types.js";
 
 interface SourceRow {
@@ -120,15 +121,16 @@ export class MemoryStore {
   }
 
   search(query: string, limit = 8): SearchHit[] {
-    const normalized = query.normalize("NFKC").trim();
+    const normalized = normalizeQuery(query);
     if (!normalized) return [];
-    const tokens = queryTokens(normalized);
+    const tokens = meaningfulQueryTokens(normalized);
+    if (tokens.length === 0) return [];
     const rows = new Map<string, SearchRow>();
     if (tokens.length > 0 && !(tokens.length === 1 && [...tokens[0]!].length === 1)) {
       const match = tokens.map((token) => `"${token.replaceAll('"', '""')}"`).join(" OR ");
       const matched = this.database.prepare(`
         SELECT c.id AS chunk_id, c.object_hash, c.start_line, c.end_line, c.content, c.heading_path,
-               s.id AS source_id, s.origin, s.title, bm25(chunks_fts) AS rank
+               s.id AS source_id, s.origin, s.title, bm25(chunks_fts, 0.0, 5.0, 1.0) AS rank
         FROM chunks_fts
         JOIN chunks c ON c.id = chunks_fts.chunk_id
         JOIN sources s ON s.object_hash = c.object_hash AND s.deleted_at IS NULL
@@ -158,26 +160,67 @@ export class MemoryStore {
     `).all(normalized) as unknown as SearchRow[];
     for (const row of titleMatches) rows.set(`${row.source_id}:${row.chunk_id}`, row);
 
-    const queryIndexTokens = new Set(tokens);
     return [...rows.values()]
-      .map((row) => {
-        const titleMatches = indexTokens(row.title).filter((token) => queryIndexTokens.has(token)).length;
-        const score = titleMatches * 10 + Math.max(0, -row.rank) + (row.content.includes(normalized) ? 2 : 0);
+      .map((row): SearchHit | null => {
+        const headingPath = parseHeadingPath(row.heading_path);
+        const lexical = scoreCandidate(normalized, { title: row.title, heading: headingPath.join(" "), body: row.content }, row.rank);
+        if (!lexical) return null;
         return {
           sourceId: row.source_id,
           chunkId: row.chunk_id,
           title: row.title,
           origin: row.origin,
           objectHash: row.object_hash,
-          excerpt: this.excerpt(row.content, normalized),
+          excerpt: evidenceExcerpt(row.content, normalized, lexical.terms),
           startLine: row.start_line,
           endLine: row.end_line,
-          headingPath: parseHeadingPath(row.heading_path),
-          score,
+          headingPath,
+          coverage: lexical.coverage,
+          exact: lexical.exact,
+          matchedQueries: [query.trim()],
+          score: lexical.score,
         };
       })
+      .filter((hit): hit is SearchHit => hit !== null)
       .sort((left, right) => right.score - left.score || left.title.localeCompare(right.title, "zh-CN"))
       .slice(0, Math.max(1, Math.min(limit, 30)));
+  }
+
+  query(queries: string[], limit = 8): SearchHit[] {
+    const unique = [...new Set(queries.map((query) => query.normalize("NFKC").trim()).filter(Boolean))].slice(0, 6);
+    if (unique.length === 0) return [];
+    const fused = new Map<string, SearchHit & { rrf: number; bestLexical: number }>();
+    unique.forEach((query, queryIndex) => {
+      const weight = queryIndex === 0 ? 1.25 : 1;
+      this.search(query, 30).forEach((hit, rank) => {
+        const key = `${hit.sourceId}:${hit.chunkId}`;
+        const existing = fused.get(key);
+        const contribution = weight / (60 + rank + 1);
+        if (existing) {
+          existing.rrf += contribution;
+          existing.bestLexical = Math.max(existing.bestLexical, hit.score);
+          existing.coverage = Math.max(existing.coverage, hit.coverage);
+          existing.exact ||= hit.exact;
+          if (!existing.matchedQueries.includes(query)) existing.matchedQueries.push(query);
+        } else {
+          fused.set(key, { ...hit, matchedQueries: [query], rrf: contribution, bestLexical: hit.score });
+        }
+      });
+    });
+
+    const ranked = [...fused.values()]
+      .map(({ rrf, bestLexical, ...hit }) => ({ ...hit, score: rrf + bestLexical / 10_000 }))
+      .sort((left, right) => right.score - left.score || right.coverage - left.coverage || left.title.localeCompare(right.title, "zh-CN"));
+    const counts = new Map<string, number>();
+    const diverse: SearchHit[] = [];
+    for (const hit of ranked) {
+      const count = counts.get(hit.sourceId) ?? 0;
+      if (count >= 2) continue;
+      counts.set(hit.sourceId, count + 1);
+      diverse.push(hit);
+      if (diverse.length >= Math.max(1, Math.min(limit, 30))) break;
+    }
+    return diverse;
   }
 
   readSource(sourceId: string, startLine = 1, endLine = 200): ReadSourceResult {
@@ -239,13 +282,6 @@ export class MemoryStore {
     };
   }
 
-  private excerpt(content: string, query: string): string {
-    const index = content.toLocaleLowerCase().indexOf(query.toLocaleLowerCase());
-    if (index < 0) return content.slice(0, 260);
-    const start = Math.max(0, index - 90);
-    const end = Math.min(content.length, index + query.length + 170);
-    return `${start > 0 ? "…" : ""}${content.slice(start, end)}${end < content.length ? "…" : ""}`;
-  }
 }
 
 function migrateToV2(database: DatabaseSync): void {
