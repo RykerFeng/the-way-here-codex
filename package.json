@@ -1,0 +1,33 @@
+{
+  "name": "the-way-here-codex",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "the-way-here": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "LOAD.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "test": "tsx --test test/**/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "cheerio": "1.2.0",
+    "yauzl": "3.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.0.0",
+    "@types/yauzl": "2.10.3",
+    "tsx": "4.23.13",
+    "typescript": "7.0.2"
+  }
+}
