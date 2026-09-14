@@ -91,7 +91,7 @@ export async function importWeb(store: MemoryStore, entryUrl: string, options: W
     totalBytes += body.bytes;
     const html = body.buffer.toString("utf8");
     const pageName = page.finalUrl.pathname.endsWith("/") ? `${page.finalUrl.pathname}index.html` : `${page.finalUrl.pathname}.html`;
-    const documents = normalizeFileContent(pageName, body.buffer);
+    const documents = normalizeFileContent(pageName, body.buffer, finalCanonical);
     if (documents[0]) {
       const imported = store.importDocument({
         kind: "web",

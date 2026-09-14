@@ -1,6 +1,6 @@
 import path from "node:path";
-import { load } from "cheerio";
 import type { SourceKind } from "../types.js";
+import { extractHtmlContent } from "./html.js";
 
 export interface NormalizedDocument {
   title: string;
@@ -16,7 +16,7 @@ export function isSupportedFileName(fileName: string): boolean {
   return textExtensions.has(extension) || extension === ".html" || extension === ".htm" || extension === ".json";
 }
 
-export function normalizeFileContent(fileName: string, bytes: Buffer): NormalizedDocument[] {
+export function normalizeFileContent(fileName: string, bytes: Buffer, sourceUrl?: string): NormalizedDocument[] {
   const extension = path.extname(fileName).toLocaleLowerCase();
   const fallbackTitle = path.basename(fileName, extension) || "未命名资料";
   const decoded = bytes.toString("utf8").replaceAll("\0", "").replace(/\r\n?/g, "\n").trim();
@@ -26,14 +26,7 @@ export function normalizeFileContent(fileName: string, bytes: Buffer): Normalize
     return [{ title: fallbackTitle, content: decoded, kind: "file" }];
   }
   if (extension === ".html" || extension === ".htm") {
-    const $ = load(decoded);
-    const title = $("title").first().text().trim() || $("h1").first().text().trim() || fallbackTitle;
-    $("script, style, nav, form, noscript, template, svg, head, [hidden], [aria-hidden='true']").remove();
-    const content = $("body").text()
-      .split("\n")
-      .map((line) => line.replace(/[\t ]+/g, " ").trim())
-      .filter(Boolean)
-      .join("\n");
+    const { title, content } = extractHtmlContent(decoded, sourceUrl);
     return content ? [{ title, content, kind: "file" }] : [];
   }
   if (extension === ".json") return normalizeJson(decoded, fallbackTitle);
