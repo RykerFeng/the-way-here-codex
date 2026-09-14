@@ -27,7 +27,9 @@
   "devDependencies": {
     "@types/node": "26.0.0",
     "@types/yauzl": "2.10.3",
+    "@types/yazl": "^3.3.1",
     "tsx": "4.23.13",
-    "typescript": "7.0.2"
+    "typescript": "7.0.2",
+    "yazl": "^3.3.1"
   }
 }
