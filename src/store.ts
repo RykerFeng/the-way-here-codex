@@ -3,7 +3,8 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { MemoryError } from "./errors.js";
-import type { ImportDocumentInput, ImportDocumentResult, SourceKind, SourceRecord, StoreStatus } from "./types.js";
+import { chunkText, indexTokens, queryTokens } from "./text.js";
+import type { ImportDocumentInput, ImportDocumentResult, SearchHit, SourceKind, SourceRecord, StoreStatus } from "./types.js";
 
 interface SourceRow {
   id: string;
@@ -13,6 +14,18 @@ interface SourceRow {
   object_hash: string;
   imported_at: string;
   deleted_at: string | null;
+}
+
+interface SearchRow {
+  chunk_id: string;
+  object_hash: string;
+  start_line: number;
+  end_line: number;
+  content: string;
+  source_id: string;
+  origin: string;
+  title: string;
+  rank: number;
 }
 
 export class MemoryStore {
@@ -49,6 +62,10 @@ export class MemoryStore {
         content TEXT NOT NULL,
         UNIQUE(object_hash, ordinal)
       );
+      CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+        chunk_id UNINDEXED,
+        body_tokens
+      );
     `);
     return new MemoryStore(database);
   }
@@ -64,9 +81,13 @@ export class MemoryStore {
       const objectCreated = !existingObject;
       if (objectCreated) {
         this.database.prepare("INSERT INTO objects(hash, content, created_at) VALUES (?, ?, ?)").run(objectHash, content, importedAt);
-        const lineCount = content.split("\n").length;
-        this.database.prepare("INSERT INTO chunks(id, object_hash, ordinal, start_line, end_line, content) VALUES (?, ?, 0, 1, ?, ?)")
-          .run(randomUUID(), objectHash, lineCount, content);
+        for (const chunk of chunkText(content)) {
+          const chunkId = randomUUID();
+          this.database.prepare("INSERT INTO chunks(id, object_hash, ordinal, start_line, end_line, content) VALUES (?, ?, ?, ?, ?, ?)")
+            .run(chunkId, objectHash, chunk.ordinal, chunk.startLine, chunk.endLine, chunk.content);
+          this.database.prepare("INSERT INTO chunks_fts(chunk_id, body_tokens) VALUES (?, ?)")
+            .run(chunkId, indexTokens(chunk.content).join(" "));
+        }
       }
 
       const existing = this.database.prepare(
@@ -99,6 +120,56 @@ export class MemoryStore {
     if (result.changes === 0) throw new MemoryError("SOURCE_NOT_FOUND", "资料不存在或已经移除。", false, "先运行 status 或 search 检查资料 ID。");
   }
 
+  search(query: string, limit = 8): SearchHit[] {
+    const normalized = query.normalize("NFKC").trim();
+    if (!normalized) return [];
+    const tokens = queryTokens(normalized);
+    const rows = new Map<string, SearchRow>();
+    if (tokens.length > 0 && !(tokens.length === 1 && [...tokens[0]!].length === 1)) {
+      const match = tokens.map((token) => `"${token.replaceAll('"', '""')}"`).join(" OR ");
+      const matched = this.database.prepare(`
+        SELECT c.id AS chunk_id, c.object_hash, c.start_line, c.end_line, c.content,
+               s.id AS source_id, s.origin, s.title, bm25(chunks_fts) AS rank
+        FROM chunks_fts
+        JOIN chunks c ON c.id = chunks_fts.chunk_id
+        JOIN sources s ON s.object_hash = c.object_hash AND s.deleted_at IS NULL
+        WHERE chunks_fts MATCH ?
+        LIMIT 200
+      `).all(match) as unknown as SearchRow[];
+      for (const row of matched) rows.set(`${row.source_id}:${row.chunk_id}`, row);
+    }
+
+    const titleOrSingle = this.database.prepare(`
+      SELECT c.id AS chunk_id, c.object_hash, c.start_line, c.end_line, c.content,
+             s.id AS source_id, s.origin, s.title, 0 AS rank
+      FROM sources s
+      JOIN chunks c ON c.object_hash = s.object_hash AND c.ordinal = 0
+      WHERE s.deleted_at IS NULL AND (instr(lower(s.title), lower(?)) > 0 OR instr(c.content, ?) > 0)
+      LIMIT 200
+    `).all(normalized, normalized) as unknown as SearchRow[];
+    for (const row of titleOrSingle) rows.set(`${row.source_id}:${row.chunk_id}`, row);
+
+    const queryIndexTokens = new Set(tokens);
+    return [...rows.values()]
+      .map((row) => {
+        const titleMatches = indexTokens(row.title).filter((token) => queryIndexTokens.has(token)).length;
+        const score = titleMatches * 10 + Math.max(0, -row.rank) + (row.content.includes(normalized) ? 2 : 0);
+        return {
+          sourceId: row.source_id,
+          chunkId: row.chunk_id,
+          title: row.title,
+          origin: row.origin,
+          objectHash: row.object_hash,
+          excerpt: this.excerpt(row.content, normalized),
+          startLine: row.start_line,
+          endLine: row.end_line,
+          score,
+        };
+      })
+      .sort((left, right) => right.score - left.score || left.title.localeCompare(right.title, "zh-CN"))
+      .slice(0, Math.max(1, Math.min(limit, 30)));
+  }
+
   status(): StoreStatus {
     const sources = this.count("SELECT count(*) AS count FROM sources WHERE deleted_at IS NULL");
     const objects = this.count("SELECT count(DISTINCT object_hash) AS count FROM sources WHERE deleted_at IS NULL");
@@ -124,5 +195,13 @@ export class MemoryStore {
       importedAt: row.imported_at,
       deletedAt: row.deleted_at,
     };
+  }
+
+  private excerpt(content: string, query: string): string {
+    const index = content.toLocaleLowerCase().indexOf(query.toLocaleLowerCase());
+    if (index < 0) return content.slice(0, 260);
+    const start = Math.max(0, index - 90);
+    const end = Math.min(content.length, index + query.length + 170);
+    return `${start > 0 ? "…" : ""}${content.slice(start, end)}${end < content.length ? "…" : ""}`;
   }
 }

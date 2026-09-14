@@ -29,3 +29,15 @@ export interface StoreStatus {
   objects: number;
   chunks: number;
 }
+
+export interface SearchHit {
+  sourceId: string;
+  chunkId: string;
+  title: string;
+  origin: string;
+  objectHash: string;
+  excerpt: string;
+  startLine: number;
+  endLine: number;
+  score: number;
+}
