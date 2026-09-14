@@ -30,6 +30,17 @@ export interface StoreStatus {
   chunks: number;
 }
 
+export interface DoctorCheck {
+  name: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface DoctorResult {
+  schemaVersion: number;
+  checks: DoctorCheck[];
+}
+
 export interface SearchHit {
   sourceId: string;
   chunkId: string;

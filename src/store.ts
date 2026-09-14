@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { MemoryError } from "./errors.js";
 import { evidenceExcerpt, meaningfulQueryTokens, normalizeQuery, scoreCandidate } from "./retrieval.js";
 import { chunkText, indexTokens } from "./text.js";
-import type { ExportSnapshot, ImportDocumentInput, ImportDocumentResult, ReadSourceResult, SearchHit, SourceKind, SourceRecord, StoreStatus } from "./types.js";
+import type { DoctorResult, ExportSnapshot, ImportDocumentInput, ImportDocumentResult, ReadSourceResult, SearchHit, SourceKind, SourceRecord, StoreStatus } from "./types.js";
 
 interface SourceRow {
   id: string;
@@ -117,7 +117,29 @@ export class MemoryStore {
 
   removeSource(sourceId: string): void {
     const result = this.database.prepare("UPDATE sources SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL").run(new Date().toISOString(), sourceId);
-    if (result.changes === 0) throw new MemoryError("SOURCE_NOT_FOUND", "资料不存在或已经移除。", false, "先运行 status 或 search 检查资料 ID。");
+    if (result.changes === 0) throw new MemoryError("SOURCE_NOT_FOUND", "资料不存在或已经移除。", false, "先运行 sources 检查资料 ID。");
+  }
+
+  listSources(): SourceRecord[] {
+    const rows = this.database.prepare(`
+      SELECT id, kind, origin, title, object_hash, imported_at, deleted_at
+      FROM sources WHERE deleted_at IS NULL ORDER BY imported_at DESC, id
+    `).all() as unknown as SourceRow[];
+    return rows.map((row) => this.mapSource(row));
+  }
+
+  doctor(): DoctorResult {
+    const schemaVersion = Number((this.database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version);
+    const integrity = String((this.database.prepare("PRAGMA quick_check").get() as { quick_check: string }).quick_check);
+    const ftsTable = Boolean(this.database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chunks_fts'").get());
+    return {
+      schemaVersion,
+      checks: [
+        { name: "database", ok: integrity === "ok", detail: integrity === "ok" ? "SQLite 可读且完整" : integrity },
+        { name: "schema", ok: schemaVersion === 2, detail: `schema v${schemaVersion}` },
+        { name: "fts5", ok: ftsTable, detail: ftsTable ? "全文索引可用" : "缺少 chunks_fts" },
+      ],
+    };
   }
 
   search(query: string, limit = 8): SearchHit[] {
