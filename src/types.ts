@@ -39,6 +39,7 @@ export interface SearchHit {
   excerpt: string;
   startLine: number;
   endLine: number;
+  headingPath: string[];
   score: number;
 }
 

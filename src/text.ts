@@ -3,6 +3,7 @@ export interface TextChunk {
   startLine: number;
   endLine: number;
   content: string;
+  headingPath: string[];
 }
 
 const hanRun = /\p{Script=Han}+/gu;
@@ -27,35 +28,73 @@ export function queryTokens(value: string): string[] {
   return indexTokens(value).filter((token) => !["and", "or", "not", "near"].includes(token) || token === "or");
 }
 
-export function chunkText(value: string, targetCharacters = 4_000): TextChunk[] {
+interface TextBlock {
+  startLine: number;
+  endLine: number;
+  content: string;
+  headingPath: string[];
+}
+
+export function chunkText(value: string, targetCharacters = 1_200): TextChunk[] {
   const lines = value.replace(/\r\n?/g, "\n").split("\n");
-  const paragraphs: Array<{ startLine: number; endLine: number; content: string }> = [];
-  let start = 0;
-  for (let index = 0; index <= lines.length; index += 1) {
-    const atEnd = index === lines.length;
-    if (!atEnd && lines[index]!.trim() !== "") continue;
-    if (index > start) {
-      paragraphs.push({
-        startLine: start + 1,
-        endLine: index,
-        content: lines.slice(start, index).join("\n").trim(),
-      });
+  const blocks: TextBlock[] = [];
+  const headings: string[] = [];
+  let index = 0;
+  while (index < lines.length) {
+    if (!lines[index]!.trim()) {
+      index += 1;
+      continue;
     }
-    start = index + 1;
+    const start = index;
+    const heading = /^(#{1,6})\s+(.+?)\s*#*\s*$/.exec(lines[index]!.trim());
+    if (heading) {
+      const level = heading[1]!.length;
+      headings.length = level - 1;
+      headings[level - 1] = heading[2]!.trim();
+      blocks.push({ startLine: index + 1, endLine: index + 1, content: lines[index]!.trim(), headingPath: [...headings] });
+      index += 1;
+      continue;
+    }
+    while (index + 1 < lines.length && lines[index + 1]!.trim() && !/^#{1,6}\s+/.test(lines[index + 1]!.trim())) index += 1;
+    const content = lines.slice(start, index + 1).join("\n").trim();
+    blocks.push(...splitBlock({ startLine: start + 1, endLine: index + 1, content, headingPath: [...headings] }, targetCharacters));
+    index += 1;
   }
 
   const chunks: TextChunk[] = [];
-  let current: { startLine: number; endLine: number; parts: string[] } | undefined;
-  for (const paragraph of paragraphs) {
-    const candidateLength = (current?.parts.join("\n\n").length ?? 0) + (current ? 2 : 0) + paragraph.content.length;
-    if (current && candidateLength > targetCharacters) {
-      chunks.push({ ordinal: chunks.length, startLine: current.startLine, endLine: current.endLine, content: current.parts.join("\n\n") });
+  let current: { startLine: number; endLine: number; parts: string[]; headingPath: string[] } | undefined;
+  for (const block of blocks) {
+    const candidateLength = (current?.parts.join("\n\n").length ?? 0) + (current ? 2 : 0) + block.content.length;
+    const headingChanged = current && current.headingPath.join("\u0000") !== block.headingPath.join("\u0000");
+    if (current && (candidateLength > targetCharacters || headingChanged)) {
+      chunks.push({ ordinal: chunks.length, startLine: current.startLine, endLine: current.endLine, content: current.parts.join("\n\n"), headingPath: current.headingPath });
       current = undefined;
     }
-    if (!current) current = { startLine: paragraph.startLine, endLine: paragraph.endLine, parts: [] };
-    current.endLine = paragraph.endLine;
-    current.parts.push(paragraph.content);
+    if (!current) current = { startLine: block.startLine, endLine: block.endLine, parts: [], headingPath: block.headingPath };
+    current.endLine = block.endLine;
+    current.parts.push(block.content);
   }
-  if (current) chunks.push({ ordinal: chunks.length, startLine: current.startLine, endLine: current.endLine, content: current.parts.join("\n\n") });
+  if (current) chunks.push({ ordinal: chunks.length, startLine: current.startLine, endLine: current.endLine, content: current.parts.join("\n\n"), headingPath: current.headingPath });
   return chunks;
+}
+
+function splitBlock(block: TextBlock, targetCharacters: number): TextBlock[] {
+  if (block.content.length <= targetCharacters) return [block];
+  const units = block.content.match(/[^。！？.!?\n]+[。！？.!?]?|\n/g)?.filter((unit) => unit !== "\n") ?? [block.content];
+  const pieces: string[] = [];
+  let current = "";
+  for (const unit of units) {
+    if (unit.length > targetCharacters) {
+      if (current) pieces.push(current);
+      current = "";
+      for (let offset = 0; offset < unit.length; offset += targetCharacters) pieces.push(unit.slice(offset, offset + targetCharacters));
+    } else if (current && current.length + unit.length > targetCharacters) {
+      pieces.push(current);
+      current = unit;
+    } else {
+      current += unit;
+    }
+  }
+  if (current) pieces.push(current);
+  return pieces.map((content) => ({ ...block, content }));
 }

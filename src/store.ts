@@ -21,6 +21,7 @@ interface SearchRow {
   object_hash: string;
   start_line: number;
   end_line: number;
+  heading_path: string;
   content: string;
   source_id: string;
   origin: string;
@@ -60,13 +61,11 @@ export class MemoryStore {
         start_line INTEGER NOT NULL,
         end_line INTEGER NOT NULL,
         content TEXT NOT NULL,
+        heading_path TEXT NOT NULL DEFAULT '[]',
         UNIQUE(object_hash, ordinal)
       );
-      CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-        chunk_id UNINDEXED,
-        body_tokens
-      );
     `);
+    migrateToV2(database);
     return new MemoryStore(database);
   }
 
@@ -83,10 +82,10 @@ export class MemoryStore {
         this.database.prepare("INSERT INTO objects(hash, content, created_at) VALUES (?, ?, ?)").run(objectHash, content, importedAt);
         for (const chunk of chunkText(content)) {
           const chunkId = randomUUID();
-          this.database.prepare("INSERT INTO chunks(id, object_hash, ordinal, start_line, end_line, content) VALUES (?, ?, ?, ?, ?, ?)")
-            .run(chunkId, objectHash, chunk.ordinal, chunk.startLine, chunk.endLine, chunk.content);
-          this.database.prepare("INSERT INTO chunks_fts(chunk_id, body_tokens) VALUES (?, ?)")
-            .run(chunkId, indexTokens(chunk.content).join(" "));
+          this.database.prepare("INSERT INTO chunks(id, object_hash, ordinal, start_line, end_line, content, heading_path) VALUES (?, ?, ?, ?, ?, ?, ?)")
+            .run(chunkId, objectHash, chunk.ordinal, chunk.startLine, chunk.endLine, chunk.content, JSON.stringify(chunk.headingPath));
+          this.database.prepare("INSERT INTO chunks_fts(chunk_id, heading_tokens, body_tokens) VALUES (?, ?, ?)")
+            .run(chunkId, indexTokens(chunk.headingPath.join(" ")).join(" "), indexTokens(chunk.content).join(" "));
         }
       }
 
@@ -128,7 +127,7 @@ export class MemoryStore {
     if (tokens.length > 0 && !(tokens.length === 1 && [...tokens[0]!].length === 1)) {
       const match = tokens.map((token) => `"${token.replaceAll('"', '""')}"`).join(" OR ");
       const matched = this.database.prepare(`
-        SELECT c.id AS chunk_id, c.object_hash, c.start_line, c.end_line, c.content,
+        SELECT c.id AS chunk_id, c.object_hash, c.start_line, c.end_line, c.content, c.heading_path,
                s.id AS source_id, s.origin, s.title, bm25(chunks_fts) AS rank
         FROM chunks_fts
         JOIN chunks c ON c.id = chunks_fts.chunk_id
@@ -140,7 +139,7 @@ export class MemoryStore {
     }
 
     const exactContent = this.database.prepare(`
-      SELECT c.id AS chunk_id, c.object_hash, c.start_line, c.end_line, c.content,
+      SELECT c.id AS chunk_id, c.object_hash, c.start_line, c.end_line, c.content, c.heading_path,
              s.id AS source_id, s.origin, s.title, 0 AS rank
       FROM sources s
       JOIN chunks c ON c.object_hash = s.object_hash
@@ -150,7 +149,7 @@ export class MemoryStore {
     for (const row of exactContent) rows.set(`${row.source_id}:${row.chunk_id}`, row);
 
     const titleMatches = this.database.prepare(`
-      SELECT c.id AS chunk_id, c.object_hash, c.start_line, c.end_line, c.content,
+      SELECT c.id AS chunk_id, c.object_hash, c.start_line, c.end_line, c.content, c.heading_path,
              s.id AS source_id, s.origin, s.title, 0 AS rank
       FROM sources s
       JOIN chunks c ON c.object_hash = s.object_hash AND c.ordinal = 0
@@ -173,6 +172,7 @@ export class MemoryStore {
           excerpt: this.excerpt(row.content, normalized),
           startLine: row.start_line,
           endLine: row.end_line,
+          headingPath: parseHeadingPath(row.heading_path),
           score,
         };
       })
@@ -245,5 +245,41 @@ export class MemoryStore {
     const start = Math.max(0, index - 90);
     const end = Math.min(content.length, index + query.length + 170);
     return `${start > 0 ? "…" : ""}${content.slice(start, end)}${end < content.length ? "…" : ""}`;
+  }
+}
+
+function migrateToV2(database: DatabaseSync): void {
+  const version = Number((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version);
+  const chunkColumns = database.prepare("PRAGMA table_info(chunks)").all() as Array<{ name: string }>;
+  const ftsExists = Boolean(database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chunks_fts'").get());
+  const ftsColumns = ftsExists ? database.prepare("PRAGMA table_info(chunks_fts)").all() as Array<{ name: string }> : [];
+  if (version >= 2 && chunkColumns.some((column) => column.name === "heading_path") && ftsColumns.some((column) => column.name === "heading_tokens")) return;
+
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    if (!chunkColumns.some((column) => column.name === "heading_path")) {
+      database.exec("ALTER TABLE chunks ADD COLUMN heading_path TEXT NOT NULL DEFAULT '[]'");
+    }
+    if (ftsExists) database.exec("DROP TABLE chunks_fts");
+    database.exec("CREATE VIRTUAL TABLE chunks_fts USING fts5(chunk_id UNINDEXED, heading_tokens, body_tokens)");
+    const chunks = database.prepare("SELECT id, content, heading_path FROM chunks").all() as Array<{ id: string; content: string; heading_path: string }>;
+    const insert = database.prepare("INSERT INTO chunks_fts(chunk_id, heading_tokens, body_tokens) VALUES (?, ?, ?)");
+    for (const chunk of chunks) {
+      const heading = parseHeadingPath(chunk.heading_path).join(" ");
+      insert.run(chunk.id, indexTokens(heading).join(" "), indexTokens(chunk.content).join(" "));
+    }
+    database.exec("PRAGMA user_version = 2; COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function parseHeadingPath(value: string): string[] {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) && parsed.every((item) => typeof item === "string") ? parsed : [];
+  } catch {
+    return [];
   }
 }
