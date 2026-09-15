@@ -1,6 +1,6 @@
 {
   "name": "the-way-here-codex",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -19,19 +19,20 @@
   "scripts": {
     "test": "node --disable-warning=ExperimentalWarning --import tsx --test test/**/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "build": "tsc"
+    "bundle": "esbuild src/cli.ts --bundle --platform=node --format=esm --target=node22 --banner:js=\"import { createRequire } from 'node:module';const require=createRequire(import.meta.url);\" --outfile=dist/the-way-here.mjs",
+    "build": "tsc && npm run bundle",
+    "package:release": "npm run build && node scripts/package-release.mjs",
+    "prepare": "npm run build"
   },
   "dependencies": {
-    "@mozilla/readability": "^0.6.0",
     "cheerio": "1.2.0",
-    "jsdom": "^26.1.0",
     "yauzl": "3.4.0"
   },
   "devDependencies": {
-    "@types/jsdom": "^21.1.7",
     "@types/node": "26.0.0",
     "@types/yauzl": "2.10.3",
     "@types/yazl": "^3.3.1",
+    "esbuild": "0.28.2",
     "tsx": "4.23.13",
     "typescript": "7.0.2",
     "yazl": "^3.3.1"

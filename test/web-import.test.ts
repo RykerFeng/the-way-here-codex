@@ -32,7 +32,31 @@ test("imports one public page as searchable evidence", async () => {
     });
     assert.equal(result.imported.length, 1);
     assert.equal(result.imported[0]?.source.title, "文章");
+    assert.equal(result.imported[0]?.source.purpose, "reference");
+    assert.equal(result.imported[0]?.source.authorship, "other");
     assert.equal(store.search("证据")[0]?.origin, "https://example.com/article");
+  } finally {
+    store.close();
+  }
+});
+
+test("a user-owned journal site can be explicitly brought in as personal history", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "way-here-web-memory-"));
+  const store = await MemoryStore.open(path.join(root, "space"));
+  try {
+    const result = await importWeb(store, "https://example.com/diary/2023-08-04", {
+      scope: "page",
+      purpose: "memory",
+      authorship: "user",
+      resolver,
+      fetcher: mockFetcher({
+        "https://example.com/diary/2023-08-04": { body: "<title>2023-08-04 日记</title><main><p>今天我第一次独自出发。</p></main>" },
+      }),
+    });
+    assert.equal(result.imported[0]?.source.purpose, "memory");
+    assert.equal(result.imported[0]?.source.authorship, "user");
+    assert.equal(result.imported[0]?.source.occurredAt, "2023-08-04");
+    assert.equal(store.recall(["第一次独自出发"], { mode: "moment" }).hits.length, 1);
   } finally {
     store.close();
   }

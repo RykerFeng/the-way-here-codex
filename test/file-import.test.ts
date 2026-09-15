@@ -26,15 +26,19 @@ test("recognizes a ChatGPT conversations export and preserves roles", () => {
   const exported = [{
     title: "一次对话",
     mapping: {
-      a: { id: "a", parent: null, message: { author: { role: "user" }, create_time: 1, content: { parts: ["我在想什么？"] } } },
-      b: { id: "b", parent: "a", message: { author: { role: "assistant" }, create_time: 2, content: { parts: ["你在整理思路。"] } } },
+      a: { id: "a", parent: null, message: { author: { role: "user" }, create_time: 1_704_067_200, content: { parts: ["我在想什么？"] } } },
+      b: { id: "b", parent: "a", message: { author: { role: "assistant" }, create_time: 1_704_153_600, content: { parts: ["你在整理思路。"] } } },
     },
   }];
   const documents = normalizeFileContent("conversations.json", Buffer.from(JSON.stringify(exported)));
   assert.equal(documents.length, 1);
   assert.equal(documents[0]?.kind, "chat");
-  assert.match(documents[0]?.content ?? "", /## user\n我在想什么/);
-  assert.match(documents[0]?.content ?? "", /## assistant\n你在整理思路/);
+  assert.equal(documents[0]?.purpose, "memory");
+  assert.equal(documents[0]?.authorship, "mixed");
+  assert.equal(documents[0]?.occurredAt, "2024-01-01");
+  assert.equal(documents[0]?.occurredEnd, "2024-01-02");
+  assert.match(documents[0]?.content ?? "", /## 2024-01-01 · user\n我在想什么/);
+  assert.match(documents[0]?.content ?? "", /## 2024-01-02 · assistant\n你在整理思路/);
 });
 
 test("imports a plain file idempotently", async () => {

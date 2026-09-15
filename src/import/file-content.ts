@@ -1,5 +1,6 @@
 import path from "node:path";
-import type { SourceKind } from "../types.js";
+import { inferDate } from "../time.js";
+import type { Authorship, SourceKind, SourcePurpose } from "../types.js";
 import { extractHtmlContent } from "./html.js";
 
 export interface NormalizedDocument {
@@ -7,6 +8,10 @@ export interface NormalizedDocument {
   content: string;
   kind: SourceKind;
   originSuffix?: string;
+  purpose?: SourcePurpose;
+  authorship?: Authorship;
+  occurredAt?: string | null;
+  occurredEnd?: string | null;
 }
 
 const textExtensions = new Set([".md", ".markdown", ".txt"]);
@@ -26,11 +31,12 @@ export function normalizeFileContent(fileName: string, bytes: Buffer, sourceUrl?
     const heading = extension === ".md" || extension === ".markdown"
       ? /^\s*#\s+(.+?)\s*#*\s*$/m.exec(decoded)?.[1]?.trim()
       : undefined;
-    return [{ title: heading || fallbackTitle, content: decoded, kind: "file" }];
+    const title = heading || fallbackTitle;
+    return [{ title, content: decoded, kind: "file", occurredAt: inferDate([title, fileName])?.date ?? null }];
   }
   if (extension === ".html" || extension === ".htm") {
     const { title, content } = extractHtmlContent(decoded, sourceUrl);
-    return content ? [{ title, content, kind: "file" }] : [];
+    return content ? [{ title, content, kind: "file", occurredAt: inferDate([title, fileName])?.date ?? null }] : [];
   }
   if (extension === ".json") return normalizeJson(decoded, fallbackTitle);
   return [];
@@ -54,13 +60,25 @@ function normalizeJson(decoded: string, fallbackTitle: string): NormalizedDocume
       return {
         title,
         kind: "chat" as const,
+        purpose: "memory" as const,
+        authorship: "mixed" as const,
         originSuffix: `conversation-${index + 1}`,
-        content: [`# ${title}`, ...messages.map((message) => `## ${message.role}\n${message.text}`)].join("\n\n"),
+        occurredAt: timestampDate(messages.find((message) => message.createdAt > 0)?.createdAt),
+        occurredEnd: timestampDate(messages.slice().reverse().find((message) => message.createdAt > 0)?.createdAt),
+        content: [`# ${title}`, ...messages.map((message) => {
+          const date = timestampDate(message.createdAt);
+          return `## ${date ? `${date} · ` : ""}${message.role}\n${message.text}`;
+        })].join("\n\n"),
       };
     });
   }
 
   return [{ title: fallbackTitle, content: JSON.stringify(value, null, 2), kind: "file" }];
+}
+
+function timestampDate(value: number | undefined): string | null {
+  if (!value || !Number.isFinite(value) || value <= 0) return null;
+  return new Date(value * 1_000).toISOString().slice(0, 10);
 }
 
 interface ChatConversation {
