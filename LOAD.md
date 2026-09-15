@@ -30,6 +30,10 @@ node --disable-warning=ExperimentalWarning <toolkit>/dist/cli.js overview --spac
 
 只有用户明确说“收进来、导入、保存到资料库”等意思时才持久导入。只发链接或询问链接内容，不代表同意保存。
 
+每条资料还要区分三种时间：`occurredAt` 是事情发生的时间，`publishedAt / modifiedAt` 是文档时间，`observedAt` 是系统本次看到它的时间。回答“当时发生了什么”只能用事件时间；网页刚更新不能证明事情刚发生。
+
+作者、说话者和内容主角也不是一回事。只有 `subject=user` 且 `contentScope=personal` 才足以直接支撑“用户经历过/决定过”。`sourced` 和 `fictional` 不进入个人回忆；`unknown` 可以作为待核对线索，但必须拒绝个人断言。
+
 用户自己的日记、复盘和私人笔记：
 
 ```bash
@@ -123,7 +127,7 @@ node --disable-warning=ExperimentalWarning <toolkit>/dist/cli.js remember --spac
 资料归类不对时，先从 `sources` 找到准确 ID，再重新标记：
 
 ```bash
-node --disable-warning=ExperimentalWarning <toolkit>/dist/cli.js mark --space <资料空间绝对路径> <sourceId> --as memory --authorship user
+node --disable-warning=ExperimentalWarning <toolkit>/dist/cli.js mark --space <资料空间绝对路径> <sourceId> --as memory --authorship user --content-scope personal
 ```
 
 用户要求忘掉某份资料时，先确认准确 `sourceId`，再运行 `remove`。这是软删除，不会删除原 ZIP、原文件、网页或 Codex 聊天记录。

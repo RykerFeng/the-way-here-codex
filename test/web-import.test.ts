@@ -90,6 +90,31 @@ test("site crawl stays on origin and entry directory, obeys robots, and reports 
   }
 });
 
+test("site discovery uses sitemap and RSS dates beyond visible navigation", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "way-here-web-discovery-"));
+  const store = await MemoryStore.open(path.join(root, "space"));
+  try {
+    const result = await importWeb(store, "https://example.com/journal/", {
+      scope: "site", resolver, delayMs: 0, maxPages: 10,
+      fetcher: mockFetcher({
+        "https://example.com/robots.txt": { type: "text/plain", body: "User-agent: *\nSitemap: https://example.com/sitemap.xml" },
+        "https://example.com/sitemap.xml": { type: "application/xml", body: "<urlset><url><loc>https://example.com/journal/from-map</loc><lastmod>2024-05-02</lastmod></url></urlset>" },
+        "https://example.com/journal/": { body: '<title>日记</title><link rel="alternate" type="application/rss+xml" href="/feed.xml"><main>入口没有文章链接</main>' },
+        "https://example.com/feed.xml": { type: "application/rss+xml", body: "<rss><channel><item><link>https://example.com/journal/from-feed</link><pubDate>2024-06-03T00:00:00Z</pubDate></item></channel></rss>" },
+        "https://example.com/journal/from-map": { body: "<title>地图发现</title><main>从站点地图发现的过去。</main>" },
+        "https://example.com/journal/from-feed": { body: "<title>订阅发现</title><main>从订阅发现的过去。</main>" },
+      }),
+    });
+    assert.equal(result.imported.length, 3);
+    const mapSource = result.imported.find((item) => item.source.title === "地图发现")?.source;
+    const feedSource = result.imported.find((item) => item.source.title === "订阅发现")?.source;
+    assert.equal(mapSource?.modifiedAt, "2024-05-02");
+    assert.equal(feedSource?.publishedAt, "2024-06-03T00:00:00.000Z");
+  } finally {
+    store.close();
+  }
+});
+
 test("validates redirects and response limits", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "way-here-web-limits-"));
   const store = await MemoryStore.open(path.join(root, "space"));
@@ -115,6 +140,18 @@ test("validates redirects and response limits", async () => {
       fetcher: mockFetcher({ "https://example.com/file.pdf": { type: "application/pdf", body: "%PDF" } }),
     });
     assert.equal(binary.skipped[0]?.code, "NON_HTML");
+
+    const outside = await importWeb(store, "https://example.com/docs/", {
+      scope: "site", resolver, delayMs: 0,
+      fetcher: mockFetcher({
+        "https://example.com/robots.txt": { type: "text/plain", body: "User-agent: *" },
+        "https://example.com/sitemap.xml": { status: 404, type: "text/plain" },
+        "https://example.com/docs/": { status: 302, location: "https://other.example/docs/" },
+        "https://other.example/docs/": { body: "<main>站外正文</main>" },
+      }),
+    });
+    assert.equal(outside.imported.length, 0);
+    assert.equal(outside.skipped[0]?.code, "CROSS_ORIGIN_REDIRECT");
   } finally {
     store.close();
   }

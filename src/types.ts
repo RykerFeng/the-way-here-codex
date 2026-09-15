@@ -1,6 +1,8 @@
 export type SourceKind = "file" | "web" | "chat" | "text";
 export type SourcePurpose = "memory" | "reference";
 export type Authorship = "user" | "other" | "mixed" | "unknown";
+export type ContentScope = "personal" | "sourced" | "fictional" | "unknown";
+export type TimeProvenance = "explicit" | "platform" | "filename" | "inferred" | "unknown";
 export type RecallMode = "moment" | "change" | "relationship" | "pattern" | "quote";
 
 export interface ImportDocumentInput {
@@ -13,6 +15,16 @@ export interface ImportDocumentInput {
   authorship?: Authorship;
   occurredAt?: string | null;
   occurredEnd?: string | null;
+  eventTimeProvenance?: TimeProvenance;
+  publishedAt?: string | null;
+  modifiedAt?: string | null;
+  observedAt?: string | null;
+  author?: string | null;
+  speaker?: string | null;
+  subject?: string | null;
+  contentScope?: ContentScope;
+  externalId?: string | null;
+  connectionId?: string | null;
 }
 
 export interface SourceRecord {
@@ -27,6 +39,18 @@ export interface SourceRecord {
   authorship: Authorship;
   occurredAt: string | null;
   occurredEnd: string | null;
+  eventTimeProvenance: TimeProvenance;
+  publishedAt: string | null;
+  modifiedAt: string | null;
+  observedAt: string;
+  author: string | null;
+  speaker: string | null;
+  subject: string | null;
+  contentScope: ContentScope;
+  externalId: string | null;
+  connectionId: string | null;
+  isCurrent: boolean;
+  supersededAt: string | null;
 }
 
 export interface ImportDocumentResult {
@@ -39,6 +63,30 @@ export interface StoreStatus {
   sources: number;
   objects: number;
   chunks: number;
+}
+
+export type SyncJobState = "pending" | "running" | "completed" | "failed";
+
+export interface SyncJobRecord {
+  id: string;
+  connectionId: string;
+  state: SyncJobState;
+  completed: number;
+  total: number | null;
+  imported: number;
+  unchanged: number;
+  skipped: number;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SyncProgress {
+  completed: number;
+  total: number | null;
+  imported: number;
+  unchanged: number;
+  skipped: number;
 }
 
 export interface DoctorCheck {
@@ -69,6 +117,8 @@ export interface SearchHit {
   purpose: SourcePurpose;
   authorship: Authorship;
   occurredAt: string | null;
+  subject: string | null;
+  contentScope: ContentScope;
 }
 
 export interface RecallOptions {
@@ -110,7 +160,7 @@ export interface ReadSourceResult {
 }
 
 export interface ExportSnapshot {
-  version: 2;
+  version: 3;
   exportedAt: string;
   sources: Array<SourceRecord & { content: string }>;
 }

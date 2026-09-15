@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { mkdir, readFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import yazl from "yazl";
@@ -12,7 +12,11 @@ const outputDirectory = path.join(root, "release");
 const outputPath = path.join(outputDirectory, `${name}.zip`);
 const files = [
   ["dist/the-way-here.mjs", "the-way-here.mjs"],
+  ["START.md", "START.md"],
   ["LOAD.md", "LOAD.md"],
+  ["skills/the-way-here/SKILL.md", "skills/the-way-here/SKILL.md"],
+  ["skills/the-way-here/agents/openai.yaml", "skills/the-way-here/agents/openai.yaml"],
+  ["skills/the-way-here/scripts/resolve-cli.mjs", "skills/the-way-here/scripts/resolve-cli.mjs"],
   ["README.md", "README.md"],
   ["LICENSE", "LICENSE"],
 ];
@@ -34,5 +38,10 @@ await new Promise((resolve, reject) => {
   output.on("error", reject);
   zip.outputStream.on("error", reject).pipe(output);
 });
+
+const standalonePath = path.join(outputDirectory, "the-way-here.mjs");
+await copyFile(path.join(root, "dist/the-way-here.mjs"), standalonePath);
+const standaloneHash = createHash("sha256").update(await readFile(standalonePath)).digest("hex");
+await writeFile(path.join(outputDirectory, "the-way-here.mjs.sha256"), `${standaloneHash}  the-way-here.mjs\n`, { mode: 0o644 });
 
 process.stdout.write(`${outputPath}\n`);

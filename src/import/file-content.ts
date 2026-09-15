@@ -1,6 +1,6 @@
 import path from "node:path";
 import { inferDate } from "../time.js";
-import type { Authorship, SourceKind, SourcePurpose } from "../types.js";
+import type { Authorship, SourceKind, SourcePurpose, TimeProvenance } from "../types.js";
 import { extractHtmlContent } from "./html.js";
 
 export interface NormalizedDocument {
@@ -12,6 +12,7 @@ export interface NormalizedDocument {
   authorship?: Authorship;
   occurredAt?: string | null;
   occurredEnd?: string | null;
+  eventTimeProvenance?: TimeProvenance;
 }
 
 const textExtensions = new Set([".md", ".markdown", ".txt"]);
@@ -32,11 +33,13 @@ export function normalizeFileContent(fileName: string, bytes: Buffer, sourceUrl?
       ? /^\s*#\s+(.+?)\s*#*\s*$/m.exec(decoded)?.[1]?.trim()
       : undefined;
     const title = heading || fallbackTitle;
-    return [{ title, content: decoded, kind: "file", occurredAt: inferDate([title, fileName])?.date ?? null }];
+    const occurredAt = inferDate([title, fileName])?.date ?? null;
+    return [{ title, content: decoded, kind: "file", occurredAt, eventTimeProvenance: occurredAt ? "filename" : "unknown" }];
   }
   if (extension === ".html" || extension === ".htm") {
     const { title, content } = extractHtmlContent(decoded, sourceUrl);
-    return content ? [{ title, content, kind: "file", occurredAt: inferDate([title, fileName])?.date ?? null }] : [];
+    const occurredAt = inferDate([title, fileName])?.date ?? null;
+    return content ? [{ title, content, kind: "file", occurredAt, eventTimeProvenance: occurredAt ? "filename" : "unknown" }] : [];
   }
   if (extension === ".json") return normalizeJson(decoded, fallbackTitle);
   return [];
@@ -65,6 +68,7 @@ function normalizeJson(decoded: string, fallbackTitle: string): NormalizedDocume
         originSuffix: `conversation-${index + 1}`,
         occurredAt: timestampDate(messages.find((message) => message.createdAt > 0)?.createdAt),
         occurredEnd: timestampDate(messages.slice().reverse().find((message) => message.createdAt > 0)?.createdAt),
+        eventTimeProvenance: "platform" as const,
         content: [`# ${title}`, ...messages.map((message) => {
           const date = timestampDate(message.createdAt);
           return `## ${date ? `${date} · ` : ""}${message.role}\n${message.text}`;

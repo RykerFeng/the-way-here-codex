@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import "./warnings.js";
+import { spawn } from "node:child_process";
 import { access, mkdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,9 +8,11 @@ import { MemoryError } from "./errors.js";
 import { importFiles } from "./import/import-files.js";
 import { importWeb } from "./import/web.js";
 import { failure, success } from "./output.js";
+import { connectProfile, detectConnectionKind, ensureProfile, profileSpace, readProfile } from "./profile.js";
 import { MemoryStore } from "./store.js";
+import { runSyncJob } from "./sync.js";
 import { VERSION } from "./version.js";
-import type { Authorship, RecallMode, RememberEntryInput, SourcePurpose } from "./types.js";
+import type { Authorship, ContentScope, JourneyOverview, RecallMode, RememberEntryInput, SourcePurpose, SyncJobRecord } from "./types.js";
 
 interface ParsedArguments {
   flags: Map<string, string | true>;
@@ -29,11 +32,30 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
   const parsed = parseArguments(argv.slice(1));
-  const space = requiredAbsolute(parsed, "space");
-  if (command !== "init" && command !== "setup") await requireExistingSpace(space);
+  const profileName = optionalString(parsed, "profile") ?? "me";
+  const space = resolveSpace(parsed, profileName);
+  if (command !== "init" && command !== "setup" && command !== "enter") await requireExistingSpace(space);
+
+  if (command === "_sync-worker") {
+    const connectionId = requiredPositionalAt(parsed, 0, "连接 ID");
+    const jobId = requiredPositionalAt(parsed, 1, "同步任务 ID");
+    const profile = await readProfile(space);
+    const connection = profile?.connections.find((item) => item.id === connectionId);
+    if (!connection) throw new MemoryError("CONNECTION_NOT_FOUND", "找不到要同步的来源。", false, "重新运行 enter。 ");
+    const workerStore = await MemoryStore.open(space);
+    try {
+      const job = workerStore.getSyncJob(jobId);
+      if (!job) throw new MemoryError("SYNC_JOB_NOT_FOUND", "找不到同步任务。", false, "重新运行 enter。 ");
+      await runSyncJob(workerStore, space, connection, job);
+    } finally {
+      workerStore.close();
+    }
+    return;
+  }
 
   if (command === "init" || command === "setup") {
     await mkdir(space, { recursive: true });
+    await ensureProfile(space, profileName);
     const store = await MemoryStore.open(space);
     try {
       const value: Record<string, unknown> = { space, status: store.status() };
@@ -53,28 +75,91 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
 
+  if (command === "enter") {
+    await mkdir(space, { recursive: true });
+    const profile = await ensureProfile(space, profileName);
+    const store = await MemoryStore.open(space);
+    try {
+      const input = parsed.positionals[0];
+      let sync: SyncJobRecord | null = null;
+      const syncs: SyncJobRecord[] = [];
+      let connectionCreated = false;
+      if (input) {
+        const kind = detectConnectionKind(input);
+        const connected = await connectProfile(space, input, {
+          purpose: optionalPurpose(parsed) ?? (kind === "github" ? "reference" : "memory"),
+          authorship: optionalAuthorship(parsed) ?? (kind === "github" ? "other" : "user"),
+          contentScope: optionalContentScope(parsed) ?? (kind === "github" ? "sourced" : "personal"),
+          scope: optionalScope(parsed),
+        });
+        connectionCreated = connected.created;
+        const active = store.getActiveSyncJob(connected.connection.id);
+        const job = active ?? store.createSyncJob(connected.connection.id);
+        if (active) {
+          sync = active;
+        } else if (connected.connection.kind === "local" || parsed.flags.get("wait") === true) {
+          sync = await runSyncJob(store, space, connected.connection, job);
+        } else {
+          await startSyncWorker(space, profileName, connected.connection.id, job.id);
+          sync = job;
+        }
+        syncs.push(sync);
+      } else {
+        for (const connection of profile.connections) {
+          const active = store.getActiveSyncJob(connection.id);
+          const job = active ?? store.createSyncJob(connection.id);
+          if (!active) await startSyncWorker(space, profileName, connection.id, job.id);
+          syncs.push(job);
+        }
+        sync = syncs[0] ?? null;
+      }
+      const current = await readProfile(space) ?? profile;
+      success(command, {
+        space,
+        profile: current.name,
+        activation: "current-task",
+        connectionCreated,
+        connections: current.connections.length,
+        sync,
+        syncs,
+        overview: store.overview(),
+        hereCard: buildHereCard(store.overview(), current.connections.length, sync?.state ?? null),
+        next: "本任务已经接上。之后按当前问题需要回望；其他任务不会被自动加载。",
+      });
+    } finally {
+      store.close();
+    }
+    return;
+  }
+
   const store = await MemoryStore.open(space);
   try {
     if (command === "import") {
       const input = requiredPositional(parsed, "文件路径或网页地址");
       if (isHttpUrl(input)) {
-        const scope = optionalString(parsed, "scope") ?? "page";
-        if (scope !== "page" && scope !== "site") throw usageError("--scope 只能是 page 或 site。");
-        const result = await importWeb(store, input, { scope, purpose: optionalPurpose(parsed), authorship: optionalAuthorship(parsed) });
+        const scope = optionalScope(parsed) ?? "page";
+        const result = await importWeb(store, input, {
+          scope, purpose: optionalPurpose(parsed), authorship: optionalAuthorship(parsed), contentScope: optionalContentScope(parsed),
+        });
         success(command, { space, input, scope, ...result });
       } else {
-        const result = await importFiles(store, input, { purpose: optionalPurpose(parsed), authorship: optionalAuthorship(parsed) });
+        const result = await importFiles(store, input, {
+          purpose: optionalPurpose(parsed), authorship: optionalAuthorship(parsed), contentScope: optionalContentScope(parsed),
+        });
         success(command, { space, input: path.resolve(input), ...result });
       }
     } else if (command === "import-file") {
       const input = requiredPositional(parsed, "文件路径");
-      const result = await importFiles(store, input, { purpose: optionalPurpose(parsed), authorship: optionalAuthorship(parsed) });
+      const result = await importFiles(store, input, {
+        purpose: optionalPurpose(parsed), authorship: optionalAuthorship(parsed), contentScope: optionalContentScope(parsed),
+      });
       success(command, { space, ...result });
     } else if (command === "import-url") {
       const url = requiredPositional(parsed, "网页地址");
-      const scope = optionalString(parsed, "scope") ?? "page";
-      if (scope !== "page" && scope !== "site") throw usageError("--scope 只能是 page 或 site。");
-      const result = await importWeb(store, url, { scope, purpose: optionalPurpose(parsed), authorship: optionalAuthorship(parsed) });
+      const scope = optionalScope(parsed) ?? "page";
+      const result = await importWeb(store, url, {
+        scope, purpose: optionalPurpose(parsed), authorship: optionalAuthorship(parsed), contentScope: optionalContentScope(parsed),
+      });
       success(command, { space, scope, ...result });
     } else if (command === "search") {
       const query = requiredPositional(parsed, "搜索词");
@@ -98,7 +183,7 @@ async function main(argv: string[]): Promise<void> {
     } else if (command === "mark") {
       const sourceId = requiredPositional(parsed, "资料 ID");
       const purpose = requiredPurpose(parsed);
-      success(command, { space, source: store.markSource(sourceId, purpose, optionalAuthorship(parsed)) });
+      success(command, { space, source: store.markSource(sourceId, purpose, optionalAuthorship(parsed), optionalContentScope(parsed)) });
     } else if (command === "read") {
       const sourceId = requiredPositional(parsed, "资料 ID");
       const start = optionalInteger(parsed, "start", 1);
@@ -106,7 +191,35 @@ async function main(argv: string[]): Promise<void> {
       const end = all ? Number.MAX_SAFE_INTEGER : optionalInteger(parsed, "end", start + 199);
       success(command, { space, result: store.readSource(sourceId, start, end) });
     } else if (command === "status") {
-      success(command, { space, status: store.status() });
+      success(command, { space, profile: await readProfile(space), status: store.status() });
+    } else if (command === "sync") {
+      const profile = await readProfile(space);
+      if (!profile) throw new MemoryError("PROFILE_NOT_FOUND", "找不到个人 Profile。", false, "先运行 enter <网站或路径>。");
+      const requestedId = parsed.positionals[0];
+      const connections = requestedId ? profile.connections.filter((item) => item.id === requestedId) : profile.connections;
+      if (connections.length === 0) throw new MemoryError("CONNECTION_NOT_FOUND", "没有可同步的来源。", false, "先运行 enter <网站或路径>。");
+      const jobs: SyncJobRecord[] = [];
+      for (const connection of connections) {
+        const active = store.getActiveSyncJob(connection.id);
+        if (active && parsed.flags.get("restart") === true) {
+          store.updateSyncJob(active.id, { state: "failed", error: "用户要求重新开始同步。" });
+        }
+        const usableActive = parsed.flags.get("restart") === true ? null : active;
+        const job = usableActive ?? store.createSyncJob(connection.id);
+        if (usableActive) {
+          jobs.push(usableActive);
+        } else if (parsed.flags.get("start") === true) {
+          await startSyncWorker(space, profileName, connection.id, job.id);
+          jobs.push(job);
+        } else {
+          jobs.push(await runSyncJob(store, space, connection, job));
+        }
+      }
+      success(command, { space, jobs, overview: store.overview() });
+    } else if (command === "sync-status") {
+      const job = store.getSyncJob(parsed.positionals[0]);
+      if (!job) throw new MemoryError("SYNC_JOB_NOT_FOUND", "找不到同步任务。", false, "运行 sync 创建新的同步任务。");
+      success(command, { space, job });
     } else if (command === "sources") {
       success(command, { space, sources: store.listSources() });
     } else if (command === "doctor") {
@@ -167,6 +280,13 @@ function requiredAbsolute(parsed: ParsedArguments, name: string): string {
   return path.resolve(value);
 }
 
+function resolveSpace(parsed: ParsedArguments, profileName: string): string {
+  const explicit = optionalString(parsed, "space");
+  if (explicit === null) return profileSpace(profileName);
+  if (!path.isAbsolute(explicit)) throw usageError("--space 必须是绝对路径。");
+  return path.resolve(explicit);
+}
+
 function optionalString(parsed: ParsedArguments, name: string): string | null {
   const value = parsed.flags.get(name);
   return typeof value === "string" ? value : null;
@@ -182,6 +302,12 @@ function optionalInteger(parsed: ParsedArguments, name: string, fallback: number
 
 function requiredPositional(parsed: ParsedArguments, label: string): string {
   const value = parsed.positionals[0];
+  if (!value) throw usageError(`缺少${label}。`);
+  return value;
+}
+
+function requiredPositionalAt(parsed: ParsedArguments, index: number, label: string): string {
+  const value = parsed.positionals[index];
   if (!value) throw usageError(`缺少${label}。`);
   return value;
 }
@@ -220,6 +346,22 @@ function optionalAuthorship(parsed: ParsedArguments): Authorship | undefined {
   if (value === null) return undefined;
   if (!["user", "other", "mixed", "unknown"].includes(value)) throw usageError("--authorship 只能是 user、other、mixed 或 unknown。");
   return value as Authorship;
+}
+
+function optionalContentScope(parsed: ParsedArguments): ContentScope | undefined {
+  const value = optionalString(parsed, "content-scope");
+  if (value === null) return undefined;
+  if (!["personal", "sourced", "fictional", "unknown"].includes(value)) {
+    throw usageError("--content-scope 只能是 personal、sourced、fictional 或 unknown。");
+  }
+  return value as ContentScope;
+}
+
+function optionalScope(parsed: ParsedArguments): "page" | "site" | undefined {
+  const value = optionalString(parsed, "scope");
+  if (value === null) return undefined;
+  if (value !== "page" && value !== "site") throw usageError("--scope 只能是 page 或 site。");
+  return value;
 }
 
 function requiredRecallMode(parsed: ParsedArguments): RecallMode {
@@ -270,13 +412,30 @@ function usageError(message: string): MemoryError {
 }
 
 function usage(): string {
-  return "the-way-here <setup|import|overview|recall|remember|mark|read|sources|doctor|remove|export|help|version> --space /absolute/space ...";
+  return "the-way-here <enter|sync|sync-status|setup|import|overview|recall|remember|mark|read|sources|doctor|remove|export|help|version> [--profile me|--space /absolute/space] ...";
+}
+
+function buildHereCard(overview: JourneyOverview, connections: number, syncState: string | null): string {
+  const range = overview.earliestMemory && overview.latestMemory
+    ? `${overview.earliestMemory}–${overview.latestMemory}`
+    : "日期范围尚不完整";
+  const sync = syncState === "failed"
+    ? "最近同步失败，继续使用已有资料。"
+    : syncState === "completed"
+      ? "资料已经同步。"
+      : syncState === "pending" || syncState === "running"
+        ? "新资料正在后台同步；现在先使用已经到达的部分。"
+        : "使用已有资料。";
+  return `已接上你的来时路：${overview.memories} 段来时路资料，${overview.references} 份参考，覆盖 ${range}；连接 ${connections} 个来源。${sync}`;
 }
 
 function commandHelp(command?: string): { usage: string; example: string } {
   const help: Record<string, { usage: string; example: string }> = {
+    enter: { usage: "the-way-here enter [URL_OR_PATH] [--profile me] [--wait]", example: "the-way-here enter https://www.yuque.com/me/journal" },
+    sync: { usage: "the-way-here sync [CONNECTION_ID] [--profile me] [--start] [--restart]", example: "the-way-here sync --start" },
+    "sync-status": { usage: "the-way-here sync-status [JOB_ID] [--profile me]", example: "the-way-here sync-status" },
     setup: { usage: "the-way-here setup --space /absolute/space", example: "the-way-here setup --space /Users/me/my-memory" },
-    import: { usage: "the-way-here import --space /absolute/space <file-or-url> [--as memory|reference] [--authorship user|other|mixed|unknown] [--scope page|site]", example: "the-way-here import --space /Users/me/my-memory /Users/me/过去.zip --as memory --authorship user" },
+    import: { usage: "the-way-here import --space /absolute/space <file-or-url> [--as memory|reference] [--authorship user|other|mixed|unknown] [--content-scope personal|sourced|fictional|unknown] [--scope page|site]", example: "the-way-here import --space /Users/me/my-memory /Users/me/过去.zip --as memory --authorship user --content-scope personal" },
     overview: { usage: "the-way-here overview --space /absolute/space", example: "the-way-here overview --space /Users/me/my-memory" },
     recall: { usage: "the-way-here recall --space /absolute/space --mode moment|change|relationship|pattern|quote --queries-json '[\"原问题\",\"关键词改写\"]'", example: "the-way-here recall --space /Users/me/my-memory --mode change --queries-json '[\"我对工作有什么变化\",\"工作 决定\"]'" },
     remember: { usage: "the-way-here remember --space /absolute/space --entry-json '{\"title\":\"今天\",\"content\":\"...\",\"occurredAt\":\"2026-09-15\"}'", example: "the-way-here help remember" },
@@ -286,6 +445,19 @@ function commandHelp(command?: string): { usage: string; example: string } {
     doctor: { usage: "the-way-here doctor --space /absolute/space", example: "the-way-here doctor --space /Users/me/my-memory" },
   };
   return command && help[command] ? help[command] : { usage: usage(), example: "the-way-here help query" };
+}
+
+async function startSyncWorker(space: string, profileName: string, connectionId: string, jobId: string): Promise<void> {
+  const modulePath = fileURLToPath(import.meta.url);
+  const arguments_ = [...process.execArgv, modulePath, "_sync-worker", connectionId, jobId, "--space", space, "--profile", profileName];
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(process.execPath, arguments_, { detached: true, stdio: "ignore", env: process.env });
+    child.once("spawn", () => {
+      child.unref();
+      resolve();
+    });
+    child.once("error", reject);
+  });
 }
 
 void main(process.argv.slice(2)).catch((error) => {

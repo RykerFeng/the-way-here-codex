@@ -17,6 +17,15 @@ async function run(args: string[]): Promise<Record<string, any>> {
   return JSON.parse(stdout) as Record<string, any>;
 }
 
+async function runWithHome(args: string[], dataRoot: string): Promise<Record<string, any>> {
+  const { stdout, stderr } = await execute(process.execPath, ["--disable-warning=ExperimentalWarning", "--import", "tsx", cliPath, ...args], {
+    cwd: projectRoot,
+    env: { ...process.env, THE_WAY_HERE_HOME: dataRoot },
+  });
+  assert.equal(stderr, "");
+  return JSON.parse(stdout) as Record<string, any>;
+}
+
 test("setup returns a paste-ready task-scoped prompt", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "way-here-setup-"));
   const space = path.join(root, "my evidence");
@@ -92,7 +101,7 @@ test("version and command help do not require a space", async () => {
   const version = await run(["version"]);
   const help = await run(["help", "query"]);
 
-  assert.equal(version.version, "0.3.0");
+  assert.equal(version.version, "0.4.0");
   assert.match(help.usage, /queries-json/);
   assert.match(help.example, /query --space/);
 });
@@ -108,4 +117,29 @@ test("unified import recognizes URLs before touching the file system", async () 
       return value.error?.code === "UNSAFE_URL";
     },
   );
+});
+
+test("enter creates a reusable default profile and detached sync reports completion", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "way-here-enter-"));
+  const note = path.join(root, "2025-08-01.md");
+  await writeFile(note, "# 那天的选择\n\n我决定先完成手头的事情。\n");
+
+  const entered = await runWithHome(["enter", note], root);
+  const status = await runWithHome(["status"], root);
+  const connectionId = status.profile.connections[0].id as string;
+  const startedAt = Date.now();
+  const started = await runWithHome(["sync", connectionId, "--start"], root);
+  assert.ok(Date.now() - startedAt < 2_000);
+  const jobId = started.jobs[0].id as string;
+  let job = started.jobs[0] as { state: string };
+  for (let attempt = 0; attempt < 60 && (job.state === "pending" || job.state === "running"); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    job = (await runWithHome(["sync-status", jobId], root)).job as { state: string };
+  }
+
+  assert.equal(entered.activation, "current-task");
+  assert.equal(entered.overview.memories, 1);
+  assert.equal(status.profile.connections[0].contentScope, "personal");
+  assert.equal(job.state, "completed");
+  assert.equal((await runWithHome(["enter"], root)).connections, 1);
 });

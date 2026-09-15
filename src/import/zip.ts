@@ -2,7 +2,7 @@ import path from "node:path";
 import yauzl, { type Entry, type ZipFile } from "yauzl";
 import { MemoryError } from "../errors.js";
 import type { MemoryStore } from "../store.js";
-import type { Authorship, ImportDocumentResult, SourcePurpose } from "../types.js";
+import type { Authorship, ContentScope, ImportDocumentResult, SourcePurpose, SyncProgress } from "../types.js";
 import { isSupportedFileName, normalizeFileContent } from "./file-content.js";
 
 export interface ImportLimits {
@@ -14,6 +14,11 @@ export interface ImportLimits {
 export interface ZipImportOptions extends ImportLimits {
   purpose?: SourcePurpose;
   authorship?: Authorship;
+  contentScope?: ContentScope;
+  connectionId?: string;
+  /** Use a stable public origin (for example a GitHub repository URL) instead of the temporary ZIP path. */
+  originPrefix?: string;
+  onProgress?: (progress: SyncProgress) => void;
 }
 
 export interface ImportedEntry extends ImportDocumentResult {
@@ -73,7 +78,10 @@ export async function importZip(store: MemoryStore, zipPath: string, options: Zi
     zip.on("error", (error) => finish(error));
     zip.on("end", () => finish());
     zip.on("entry", (entry: Entry) => {
-      void processEntry(entry).then(() => zip.readEntry()).catch((error: unknown) => {
+      void processEntry(entry).then(() => {
+        options.onProgress?.(progressOf(result));
+        zip.readEntry();
+      }).catch((error: unknown) => {
         finish(error instanceof Error ? error : new Error(String(error)));
       });
     });
@@ -111,7 +119,9 @@ export async function importZip(store: MemoryStore, zipPath: string, options: Zi
         return;
       }
       for (const document of documents) {
-        const origin = `${resolvedZipPath}#${entry.fileName}${document.originSuffix ? `#${document.originSuffix}` : ""}`;
+        const stableEntry = stripSingleArchiveRoot(entry.fileName);
+        const originBase = options.originPrefix ? `${options.originPrefix.replace(/#$/, "")}#${stableEntry}` : `${resolvedZipPath}#${entry.fileName}`;
+        const origin = `${originBase}${document.originSuffix ? `#${document.originSuffix}` : ""}`;
         const imported = store.importDocument({
           kind: document.kind,
           origin,
@@ -122,6 +132,11 @@ export async function importZip(store: MemoryStore, zipPath: string, options: Zi
           authorship: options.authorship ?? document.authorship,
           occurredAt: document.occurredAt,
           occurredEnd: document.occurredEnd,
+          eventTimeProvenance: document.eventTimeProvenance,
+          modifiedAt: validZipDate(entry.getLastModDate()),
+          contentScope: options.contentScope,
+          connectionId: options.connectionId,
+          externalId: options.originPrefix ? origin : undefined,
         });
         result.imported.push({ ...imported, entry: entry.fileName });
       }
@@ -129,6 +144,27 @@ export async function importZip(store: MemoryStore, zipPath: string, options: Zi
 
     zip.readEntry();
   });
+}
+
+function validZipDate(value: Date): string | undefined {
+  return Number.isNaN(value.getTime()) ? undefined : value.toISOString();
+}
+
+function progressOf(result: ImportSummary): SyncProgress {
+  const unchanged = result.imported.filter((item) => !item.sourceCreated && !item.objectCreated).length;
+  return {
+    completed: result.imported.length + result.skipped.length,
+    total: null,
+    imported: result.imported.length - unchanged,
+    unchanged,
+    skipped: result.skipped.length,
+  };
+}
+
+function stripSingleArchiveRoot(fileName: string): string {
+  const normalized = fileName.replaceAll("\\", "/");
+  const separator = normalized.indexOf("/");
+  return separator >= 0 ? normalized.slice(separator + 1) : normalized;
 }
 
 function openZip(zipPath: string): Promise<ZipFile> {

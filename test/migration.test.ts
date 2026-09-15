@@ -44,7 +44,7 @@ test("opens a v1 space, preserves evidence, and upgrades its index", async () =>
     const ftsColumns = migrated.prepare("PRAGMA table_info(chunks_fts)").all() as Array<{ name: string }>;
     const rebuilt = migrated.prepare("SELECT heading_path, start_line, end_line FROM chunks WHERE object_hash = 'hash'").get() as { heading_path: string; start_line: number; end_line: number };
     const source = migrated.prepare("SELECT purpose, authorship FROM sources WHERE id = 'source-v1'").get() as { purpose: string; authorship: string };
-    assert.equal(version.user_version, 3);
+    assert.equal(version.user_version, 4);
     assert.ok(chunkColumns.some((column) => column.name === "heading_path"));
     assert.ok(chunkColumns.some((column) => column.name === "occurred_at"));
     assert.ok(ftsColumns.some((column) => column.name === "heading_tokens"));
@@ -92,7 +92,7 @@ test("upgrades a v2 chat archive into dated mixed-authorship memory", async () =
     assert.equal(source?.occurredAt, "2024-03-08");
     assert.equal(source?.occurredEnd, "2024-03-09");
     assert.equal(store.recall(["决定先休息一天"], { mode: "moment" }).hits[0]?.sourceId, "chat-v2");
-    assert.equal(store.doctor().schemaVersion, 3);
+    assert.equal(store.doctor().schemaVersion, 4);
   } finally {
     store.close();
   }
