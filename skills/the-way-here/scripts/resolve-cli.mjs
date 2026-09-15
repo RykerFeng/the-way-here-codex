@@ -33,12 +33,11 @@ if (await exists(target)) {
 }
 
 await mkdir(toolDirectory, { recursive: true });
-const release = await fetchJson(`https://api.github.com/repos/${repository}/releases/latest`);
-const bundle = release.assets?.find((asset) => asset.name === "the-way-here.mjs");
-const checksum = release.assets?.find((asset) => asset.name === "the-way-here.mjs.sha256");
-if (!bundle || !checksum) throw new Error("最新 Release 缺少 the-way-here.mjs 或校验文件。");
-
-const [bundleResponse, checksumResponse] = await Promise.all([fetch(bundle.browser_download_url), fetch(checksum.browser_download_url)]);
+const releaseBase = `https://github.com/${repository}/releases/latest/download`;
+const [bundleResponse, checksumResponse] = await Promise.all([
+  fetch(`${releaseBase}/the-way-here.mjs`),
+  fetch(`${releaseBase}/the-way-here.mjs.sha256`),
+]);
 if (!bundleResponse.ok || !checksumResponse.ok) throw new Error("无法下载 The Way Here Release。");
 const bytes = Buffer.from(await bundleResponse.arrayBuffer());
 const expected = (await checksumResponse.text()).trim().split(/\s+/)[0]?.toLocaleLowerCase();
@@ -53,10 +52,4 @@ process.stdout.write(`${target}\n`);
 
 async function exists(value) {
   return access(value).then(() => true).catch(() => false);
-}
-
-async function fetchJson(url) {
-  const response = await fetch(url, { headers: { accept: "application/vnd.github+json", "user-agent": "the-way-here-skill" } });
-  if (!response.ok) throw new Error(`GitHub Release 请求失败：HTTP ${response.status}`);
-  return response.json();
 }
