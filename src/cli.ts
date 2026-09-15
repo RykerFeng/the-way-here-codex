@@ -9,6 +9,7 @@ import { importWeb } from "./import/web.js";
 import { failure, success } from "./output.js";
 import { MemoryStore } from "./store.js";
 import { VERSION } from "./version.js";
+import type { Authorship, RecallMode, RememberEntryInput, SourcePurpose } from "./types.js";
 
 interface ParsedArguments {
   flags: Map<string, string | true>;
@@ -37,8 +38,13 @@ async function main(argv: string[]): Promise<void> {
     try {
       const value: Record<string, unknown> = { space, status: store.status() };
       if (command === "setup") {
-        const loadPath = fileURLToPath(new URL("../LOAD.md", import.meta.url));
-        value.prompt = `请读取并遵守 ${loadPath}，只在当前任务使用资料空间 ${space}。`;
+        const loadPath = await resolveLoadPath();
+        const sessionLoadPath = path.join(space, "LOAD_THE_WAY_HERE.md");
+        const sessionPrompt = `请读取并遵守 ${loadPath}，带着资料空间 ${space} 里的来时路进入当前任务；不要影响其他任务。`;
+        await writeFile(sessionLoadPath, `# The Way Here · 当前任务入口\n\n${sessionPrompt}\n`, { mode: 0o600 });
+        value.loadFile = sessionLoadPath;
+        value.prompt = sessionPrompt;
+        value.next = "把 loadFile 拖进想使用来时路的 Codex 任务，或复制 prompt；其他任务不会受到影响。";
       }
       success(command, value);
     } finally {
@@ -54,21 +60,21 @@ async function main(argv: string[]): Promise<void> {
       if (isHttpUrl(input)) {
         const scope = optionalString(parsed, "scope") ?? "page";
         if (scope !== "page" && scope !== "site") throw usageError("--scope 只能是 page 或 site。");
-        const result = await importWeb(store, input, { scope });
+        const result = await importWeb(store, input, { scope, purpose: optionalPurpose(parsed), authorship: optionalAuthorship(parsed) });
         success(command, { space, input, scope, ...result });
       } else {
-        const result = await importFiles(store, input);
+        const result = await importFiles(store, input, { purpose: optionalPurpose(parsed), authorship: optionalAuthorship(parsed) });
         success(command, { space, input: path.resolve(input), ...result });
       }
     } else if (command === "import-file") {
       const input = requiredPositional(parsed, "文件路径");
-      const result = await importFiles(store, input);
+      const result = await importFiles(store, input, { purpose: optionalPurpose(parsed), authorship: optionalAuthorship(parsed) });
       success(command, { space, ...result });
     } else if (command === "import-url") {
       const url = requiredPositional(parsed, "网页地址");
       const scope = optionalString(parsed, "scope") ?? "page";
       if (scope !== "page" && scope !== "site") throw usageError("--scope 只能是 page 或 site。");
-      const result = await importWeb(store, url, { scope });
+      const result = await importWeb(store, url, { scope, purpose: optionalPurpose(parsed), authorship: optionalAuthorship(parsed) });
       success(command, { space, scope, ...result });
     } else if (command === "search") {
       const query = requiredPositional(parsed, "搜索词");
@@ -78,6 +84,21 @@ async function main(argv: string[]): Promise<void> {
       const queries = requiredQueries(parsed);
       const limit = optionalInteger(parsed, "limit", 8);
       success(command, { space, queries, hits: store.query(queries, limit) });
+    } else if (command === "recall") {
+      const queries = requiredQueries(parsed);
+      const mode = requiredRecallMode(parsed);
+      const limit = optionalInteger(parsed, "limit", 8);
+      const includeReferences = optionalString(parsed, "include") === "reference";
+      success(command, { space, queries, ...store.recall(queries, { mode, limit, includeReferences }) });
+    } else if (command === "remember") {
+      const entry = requiredRememberEntry(parsed);
+      success(command, { space, remembered: store.remember(entry) });
+    } else if (command === "overview") {
+      success(command, { space, overview: store.overview() });
+    } else if (command === "mark") {
+      const sourceId = requiredPositional(parsed, "资料 ID");
+      const purpose = requiredPurpose(parsed);
+      success(command, { space, source: store.markSource(sourceId, purpose, optionalAuthorship(parsed)) });
     } else if (command === "read") {
       const sourceId = requiredPositional(parsed, "资料 ID");
       const start = optionalInteger(parsed, "start", 1);
@@ -108,6 +129,15 @@ async function main(argv: string[]): Promise<void> {
   } finally {
     store.close();
   }
+}
+
+async function resolveLoadPath(): Promise<string> {
+  const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [path.join(moduleDirectory, "LOAD.md"), path.resolve(moduleDirectory, "../LOAD.md")];
+  for (const candidate of candidates) {
+    if (await access(candidate).then(() => true).catch(() => false)) return candidate;
+  }
+  throw new MemoryError("LOAD_NOT_FOUND", "找不到会话加载协议 LOAD.md。", false, "重新下载完整发布包后重试。");
 }
 
 function parseArguments(values: string[]): ParsedArguments {
@@ -172,6 +202,52 @@ function requiredQueries(parsed: ParsedArguments): string[] {
   return parsedValue.map((value) => (value as string).trim());
 }
 
+function optionalPurpose(parsed: ParsedArguments): SourcePurpose | undefined {
+  const value = optionalString(parsed, "as");
+  if (value === null) return undefined;
+  if (value !== "memory" && value !== "reference") throw usageError("--as 只能是 memory 或 reference。");
+  return value;
+}
+
+function requiredPurpose(parsed: ParsedArguments): SourcePurpose {
+  const value = optionalPurpose(parsed);
+  if (!value) throw usageError("缺少 --as；只能是 memory 或 reference。");
+  return value;
+}
+
+function optionalAuthorship(parsed: ParsedArguments): Authorship | undefined {
+  const value = optionalString(parsed, "authorship");
+  if (value === null) return undefined;
+  if (!["user", "other", "mixed", "unknown"].includes(value)) throw usageError("--authorship 只能是 user、other、mixed 或 unknown。");
+  return value as Authorship;
+}
+
+function requiredRecallMode(parsed: ParsedArguments): RecallMode {
+  const value = optionalString(parsed, "mode");
+  if (!["moment", "change", "relationship", "pattern", "quote"].includes(value ?? "")) {
+    throw usageError("--mode 只能是 moment、change、relationship、pattern 或 quote。");
+  }
+  return value as RecallMode;
+}
+
+function requiredRememberEntry(parsed: ParsedArguments): RememberEntryInput {
+  const raw = optionalString(parsed, "entry-json");
+  if (!raw) throw usageError("缺少 --entry-json。");
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw usageError("--entry-json 必须是 JSON 对象。");
+  }
+  if (typeof value !== "object" || value === null) throw usageError("--entry-json 必须是 JSON 对象。");
+  const entry = value as Record<string, unknown>;
+  if (typeof entry.title !== "string" || typeof entry.content !== "string" || typeof entry.occurredAt !== "string"
+    || (entry.context !== undefined && typeof entry.context !== "string")) {
+    throw usageError("--entry-json 需要字符串字段 title、content、occurredAt；context 可选。");
+  }
+  return { title: entry.title, content: entry.content, occurredAt: entry.occurredAt, context: entry.context as string | undefined };
+}
+
 function isHttpUrl(value: string): boolean {
   try {
     const url = new URL(value);
@@ -194,13 +270,16 @@ function usageError(message: string): MemoryError {
 }
 
 function usage(): string {
-  return "the-way-here <setup|import|query|read|sources|doctor|remove|export|help|version> --space /absolute/space ...";
+  return "the-way-here <setup|import|overview|recall|remember|mark|read|sources|doctor|remove|export|help|version> --space /absolute/space ...";
 }
 
 function commandHelp(command?: string): { usage: string; example: string } {
   const help: Record<string, { usage: string; example: string }> = {
     setup: { usage: "the-way-here setup --space /absolute/space", example: "the-way-here setup --space /Users/me/my-memory" },
-    import: { usage: "the-way-here import --space /absolute/space <file-or-url> [--scope page|site]", example: "the-way-here import --space /Users/me/my-memory /Users/me/资料.zip" },
+    import: { usage: "the-way-here import --space /absolute/space <file-or-url> [--as memory|reference] [--authorship user|other|mixed|unknown] [--scope page|site]", example: "the-way-here import --space /Users/me/my-memory /Users/me/过去.zip --as memory --authorship user" },
+    overview: { usage: "the-way-here overview --space /absolute/space", example: "the-way-here overview --space /Users/me/my-memory" },
+    recall: { usage: "the-way-here recall --space /absolute/space --mode moment|change|relationship|pattern|quote --queries-json '[\"原问题\",\"关键词改写\"]'", example: "the-way-here recall --space /Users/me/my-memory --mode change --queries-json '[\"我对工作有什么变化\",\"工作 决定\"]'" },
+    remember: { usage: "the-way-here remember --space /absolute/space --entry-json '{\"title\":\"今天\",\"content\":\"...\",\"occurredAt\":\"2026-09-15\"}'", example: "the-way-here help remember" },
     query: { usage: "the-way-here query --space /absolute/space --queries-json '[\"原问题\",\"关键词改写\"]' [--limit 8]", example: "the-way-here query --space /Users/me/my-memory --queries-json '[\"最近为什么焦虑\",\"焦虑 工作 日期\"]'" },
     read: { usage: "the-way-here read --space /absolute/space <source-id> [--start 1 --end 200|--all]", example: "the-way-here read --space /Users/me/my-memory SOURCE_ID --start 10 --end 30" },
     sources: { usage: "the-way-here sources --space /absolute/space", example: "the-way-here sources --space /Users/me/my-memory" },

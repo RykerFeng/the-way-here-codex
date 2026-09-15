@@ -1,7 +1,7 @@
 import { load } from "cheerio";
 import { MemoryError } from "../errors.js";
 import type { MemoryStore } from "../store.js";
-import type { ImportDocumentResult } from "../types.js";
+import type { Authorship, ImportDocumentResult, SourcePurpose } from "../types.js";
 import { normalizeFileContent } from "./file-content.js";
 import { canonicalizeUrl, defaultDnsResolver, type DnsResolver, validatePublicUrl } from "./network-policy.js";
 import type { SkippedEntry } from "./zip.js";
@@ -11,6 +11,8 @@ export type WebFetcher = (url: string, init?: RequestInit) => Promise<Response>;
 
 export interface WebImportOptions {
   scope: "page" | "site";
+  purpose?: SourcePurpose;
+  authorship?: Authorship;
   fetcher?: WebFetcher;
   resolver?: DnsResolver;
   maxPages?: number;
@@ -99,6 +101,9 @@ export async function importWeb(store: MemoryStore, entryUrl: string, options: W
         origin: finalCanonical,
         title: documents[0].title,
         content: documents[0].content,
+        purpose: options.purpose ?? "reference",
+        authorship: options.authorship ?? (options.purpose === "memory" ? "unknown" : "other"),
+        occurredAt: documents[0].occurredAt,
       });
       result.imported.push({ ...imported, entry: finalCanonical });
     } else {

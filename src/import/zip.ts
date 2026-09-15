@@ -2,13 +2,18 @@ import path from "node:path";
 import yauzl, { type Entry, type ZipFile } from "yauzl";
 import { MemoryError } from "../errors.js";
 import type { MemoryStore } from "../store.js";
-import type { ImportDocumentResult } from "../types.js";
+import type { Authorship, ImportDocumentResult, SourcePurpose } from "../types.js";
 import { isSupportedFileName, normalizeFileContent } from "./file-content.js";
 
 export interface ImportLimits {
   maxEntries?: number;
   maxEntryBytes?: number;
   maxTotalBytes?: number;
+}
+
+export interface ZipImportOptions extends ImportLimits {
+  purpose?: SourcePurpose;
+  authorship?: Authorship;
 }
 
 export interface ImportedEntry extends ImportDocumentResult {
@@ -48,8 +53,8 @@ export function validateZipEntry(entry: ZipEntryMetadata): string | null {
   return null;
 }
 
-export async function importZip(store: MemoryStore, zipPath: string, limits: ImportLimits = {}): Promise<ImportSummary> {
-  const actual = { ...DEFAULT_LIMITS, ...limits };
+export async function importZip(store: MemoryStore, zipPath: string, options: ZipImportOptions = {}): Promise<ImportSummary> {
+  const actual = { ...DEFAULT_LIMITS, ...options };
   const resolvedZipPath = path.resolve(zipPath);
   const zip = await openZip(resolvedZipPath);
   return await new Promise<ImportSummary>((resolve, reject) => {
@@ -113,6 +118,10 @@ export async function importZip(store: MemoryStore, zipPath: string, limits: Imp
           title: document.title,
           content: document.content,
           originalPath: resolvedZipPath,
+          purpose: options.purpose ?? document.purpose,
+          authorship: options.authorship ?? document.authorship,
+          occurredAt: document.occurredAt,
+          occurredEnd: document.occurredEnd,
         });
         result.imported.push({ ...imported, entry: entry.fileName });
       }
