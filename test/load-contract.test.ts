@@ -24,3 +24,13 @@ test("the Codex contract carries the past into the present without overreaching"
     assert.match(load, new RegExp(invariant.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
 });
+
+test("the installable skill is explicit-only and offers a task-local off switch", async () => {
+  const skill = await readFile(path.join(root, "skills", "the-way-here", "SKILL.md"), "utf8");
+  const metadata = await readFile(path.join(root, "skills", "the-way-here", "agents", "openai.yaml"), "utf8");
+  assert.match(skill, /Use only when the user invokes \$the-way-here/);
+  assert.match(skill, /Do not modify `AGENTS\.md`/);
+  assert.match(skill, /\$the-way-here off/);
+  assert.match(skill, /Ordinary conversation is never saved automatically/);
+  assert.match(metadata, /allow_implicit_invocation: false/);
+});

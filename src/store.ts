@@ -7,7 +7,7 @@ import { evidenceExcerpt, meaningfulQueryTokens, normalizeQuery, scoreCandidate 
 import { buildRecallResult } from "./story.js";
 import { chunkText, indexTokens } from "./text.js";
 import { inferDate, inferDateRange, normalizeDate } from "./time.js";
-import type { Authorship, DoctorResult, ExportSnapshot, ImportDocumentInput, ImportDocumentResult, JourneyOverview, ReadSourceResult, RecallOptions, RecallResult, RememberEntryInput, SearchHit, SourceKind, SourcePurpose, SourceRecord, StoreStatus } from "./types.js";
+import type { Authorship, ContentScope, DoctorResult, ExportSnapshot, ImportDocumentInput, ImportDocumentResult, JourneyOverview, ReadSourceResult, RecallOptions, RecallResult, RememberEntryInput, SearchHit, SourceKind, SourcePurpose, SourceRecord, StoreStatus, SyncJobRecord, SyncJobState, TimeProvenance } from "./types.js";
 
 interface QueryFilter {
   purpose?: SourcePurpose;
@@ -26,6 +26,18 @@ interface SourceRow {
   authorship: Authorship;
   occurred_at: string | null;
   occurred_end: string | null;
+  event_time_provenance: TimeProvenance;
+  published_at: string | null;
+  modified_at: string | null;
+  observed_at: string;
+  author: string | null;
+  speaker: string | null;
+  subject: string | null;
+  content_scope: ContentScope;
+  external_id: string | null;
+  connection_id: string | null;
+  is_current: number;
+  superseded_at: string | null;
 }
 
 interface SearchRow {
@@ -44,6 +56,8 @@ interface SearchRow {
   source_occurred_at: string | null;
   source_occurred_end: string | null;
   chunk_occurred_at: string | null;
+  subject: string | null;
+  content_scope: ContentScope;
 }
 
 export class MemoryStore {
@@ -73,6 +87,18 @@ export class MemoryStore {
         authorship TEXT NOT NULL DEFAULT 'unknown',
         occurred_at TEXT,
         occurred_end TEXT,
+        event_time_provenance TEXT NOT NULL DEFAULT 'unknown',
+        published_at TEXT,
+        modified_at TEXT,
+        observed_at TEXT NOT NULL DEFAULT '',
+        author TEXT,
+        speaker TEXT,
+        subject TEXT,
+        content_scope TEXT NOT NULL DEFAULT 'unknown',
+        external_id TEXT,
+        connection_id TEXT,
+        is_current INTEGER NOT NULL DEFAULT 1,
+        superseded_at TEXT,
         UNIQUE(kind, origin, object_hash)
       );
       CREATE TABLE IF NOT EXISTS chunks (
@@ -86,8 +112,21 @@ export class MemoryStore {
         occurred_at TEXT,
         UNIQUE(object_hash, ordinal)
       );
+      CREATE TABLE IF NOT EXISTS sync_jobs (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        state TEXT NOT NULL,
+        completed INTEGER NOT NULL DEFAULT 0,
+        total INTEGER,
+        imported INTEGER NOT NULL DEFAULT 0,
+        unchanged INTEGER NOT NULL DEFAULT 0,
+        skipped INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `);
-    migrateToV3(database);
+    migrateToV4(database);
     return new MemoryStore(database);
   }
 
@@ -101,6 +140,19 @@ export class MemoryStore {
     const inferredRange = inferDateRange([input.title, input.origin, content]);
     const occurredAt = normalizeOptionalDate(input.occurredAt) ?? inferredRange?.start ?? null;
     const occurredEnd = normalizeOptionalDate(input.occurredEnd) ?? (input.occurredAt ? occurredAt : inferredRange?.end) ?? occurredAt;
+    const purpose = input.purpose ?? defaultPurpose;
+    const authorship = input.authorship ?? defaultAuthorship;
+    const eventTimeProvenance = input.eventTimeProvenance
+      ?? (input.occurredAt || input.occurredEnd ? "explicit" : inferredRange ? "inferred" : "unknown");
+    const publishedAt = normalizeOptionalTimestamp(input.publishedAt);
+    const modifiedAt = normalizeOptionalTimestamp(input.modifiedAt);
+    const observedAt = normalizeOptionalTimestamp(input.observedAt) ?? importedAt;
+    const contentScope = input.contentScope ?? (purpose === "memory" && authorship === "user" ? "personal" : "unknown");
+    const author = normalizeOptionalText(input.author) ?? (authorship === "user" ? "user" : null);
+    const speaker = normalizeOptionalText(input.speaker);
+    const subject = normalizeOptionalText(input.subject) ?? (contentScope === "personal" && authorship === "user" ? "user" : null);
+    const externalId = normalizeOptionalText(input.externalId);
+    const connectionId = normalizeOptionalText(input.connectionId);
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const existingObject = this.database.prepare("SELECT hash FROM objects WHERE hash = ?").get(objectHash);
@@ -118,22 +170,48 @@ export class MemoryStore {
       }
 
       const existing = this.database.prepare(
-        "SELECT id, kind, origin, title, object_hash, imported_at, deleted_at, purpose, authorship, occurred_at, occurred_end FROM sources WHERE kind = ? AND origin = ? AND object_hash = ?",
+        `SELECT id, kind, origin, title, object_hash, imported_at, deleted_at, purpose, authorship,
+                occurred_at, occurred_end, event_time_provenance, published_at, modified_at, observed_at,
+                author, speaker, subject, content_scope, external_id, connection_id, is_current, superseded_at
+         FROM sources WHERE kind = ? AND origin = ? AND object_hash = ?`,
       ).get(input.kind, input.origin, objectHash) as SourceRow | undefined;
       if (existing) {
-        const purpose = input.purpose ?? existing.purpose;
-        const authorship = input.authorship ?? existing.authorship;
-        this.database.prepare("UPDATE sources SET deleted_at = NULL, purpose = ?, authorship = ?, occurred_at = ?, occurred_end = ? WHERE id = ?")
-          .run(purpose, authorship, occurredAt ?? existing.occurred_at, occurredEnd ?? existing.occurred_end, existing.id);
+        const preservedPurpose = input.purpose ?? existing.purpose;
+        const preservedAuthorship = input.authorship ?? existing.authorship;
+        const preservedScope = input.contentScope ?? existing.content_scope;
+        const preservedTimeProvenance = input.eventTimeProvenance ?? existing.event_time_provenance;
+        this.database.prepare(`
+          UPDATE sources SET deleted_at = NULL, purpose = ?, authorship = ?, occurred_at = ?, occurred_end = ?,
+            event_time_provenance = ?, published_at = coalesce(?, published_at), modified_at = coalesce(?, modified_at),
+            observed_at = ?, author = coalesce(?, author), speaker = coalesce(?, speaker), subject = coalesce(?, subject),
+            content_scope = ?, external_id = coalesce(?, external_id), connection_id = coalesce(?, connection_id),
+            is_current = 1, superseded_at = NULL
+          WHERE id = ?
+        `).run(preservedPurpose, preservedAuthorship, occurredAt ?? existing.occurred_at, occurredEnd ?? existing.occurred_end,
+          preservedTimeProvenance, publishedAt, modifiedAt, observedAt, author, speaker, subject, preservedScope,
+          externalId, connectionId, existing.id);
+        this.supersedeOtherVersions(existing.id, input.kind, input.origin, externalId, connectionId, importedAt);
         this.database.exec("COMMIT");
         return {
           source: this.mapSource({
             ...existing,
             deleted_at: null,
-            purpose,
-            authorship,
+            purpose: preservedPurpose,
+            authorship: preservedAuthorship,
             occurred_at: occurredAt ?? existing.occurred_at,
             occurred_end: occurredEnd ?? existing.occurred_end,
+            event_time_provenance: preservedTimeProvenance,
+            published_at: publishedAt ?? existing.published_at,
+            modified_at: modifiedAt ?? existing.modified_at,
+            observed_at: observedAt,
+            author: author ?? existing.author,
+            speaker: speaker ?? existing.speaker,
+            subject: subject ?? existing.subject,
+            content_scope: preservedScope,
+            external_id: externalId ?? existing.external_id,
+            connection_id: connectionId ?? existing.connection_id,
+            is_current: 1,
+            superseded_at: null,
           }),
           sourceCreated: false,
           objectCreated,
@@ -141,14 +219,23 @@ export class MemoryStore {
       }
 
       const id = randomUUID();
-      const purpose = input.purpose ?? defaultPurpose;
-      const authorship = input.authorship ?? defaultAuthorship;
-      this.database.prepare(
-        "INSERT INTO sources(id, kind, origin, original_path, title, object_hash, imported_at, deleted_at, purpose, authorship, occurred_at, occurred_end) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)",
-      ).run(id, input.kind, input.origin, input.originalPath ?? null, input.title, objectHash, importedAt, purpose, authorship, occurredAt, occurredEnd);
+      this.supersedeOtherVersions(id, input.kind, input.origin, externalId, connectionId, importedAt);
+      this.database.prepare(`
+        INSERT INTO sources(
+          id, kind, origin, original_path, title, object_hash, imported_at, deleted_at, purpose, authorship,
+          occurred_at, occurred_end, event_time_provenance, published_at, modified_at, observed_at,
+          author, speaker, subject, content_scope, external_id, connection_id, is_current, superseded_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL)
+      `).run(id, input.kind, input.origin, input.originalPath ?? null, input.title, objectHash, importedAt,
+        purpose, authorship, occurredAt, occurredEnd, eventTimeProvenance, publishedAt, modifiedAt, observedAt,
+        author, speaker, subject, contentScope, externalId, connectionId);
       this.database.exec("COMMIT");
       return {
-        source: { id, kind: input.kind, origin: input.origin, title: input.title, objectHash, importedAt, deletedAt: null, purpose, authorship, occurredAt, occurredEnd },
+        source: {
+          id, kind: input.kind, origin: input.origin, title: input.title, objectHash, importedAt, deletedAt: null,
+          purpose, authorship, occurredAt, occurredEnd, eventTimeProvenance, publishedAt, modifiedAt, observedAt,
+          author, speaker, subject, contentScope, externalId, connectionId, isCurrent: true, supersededAt: null,
+        },
         sourceCreated: true,
         objectCreated,
       };
@@ -165,8 +252,10 @@ export class MemoryStore {
 
   listSources(): SourceRecord[] {
     const rows = this.database.prepare(`
-      SELECT id, kind, origin, title, object_hash, imported_at, deleted_at, purpose, authorship, occurred_at, occurred_end
-      FROM sources WHERE deleted_at IS NULL ORDER BY imported_at DESC, id
+      SELECT id, kind, origin, title, object_hash, imported_at, deleted_at, purpose, authorship,
+             occurred_at, occurred_end, event_time_provenance, published_at, modified_at, observed_at,
+             author, speaker, subject, content_scope, external_id, connection_id, is_current, superseded_at
+      FROM sources WHERE deleted_at IS NULL AND is_current = 1 ORDER BY imported_at DESC, id
     `).all() as unknown as SourceRow[];
     return rows.map((row) => this.mapSource(row));
   }
@@ -179,7 +268,7 @@ export class MemoryStore {
       schemaVersion,
       checks: [
         { name: "database", ok: integrity === "ok", detail: integrity === "ok" ? "SQLite 可读且完整" : integrity },
-        { name: "schema", ok: schemaVersion === 3, detail: `schema v${schemaVersion}` },
+        { name: "schema", ok: schemaVersion === 4, detail: `schema v${schemaVersion}` },
         { name: "fts5", ok: ftsTable, detail: ftsTable ? "全文索引可用" : "缺少 chunks_fts" },
       ],
     };
@@ -197,12 +286,13 @@ export class MemoryStore {
         SELECT c.id AS chunk_id, c.object_hash, c.start_line, c.end_line, c.content, c.heading_path,
                s.id AS source_id, s.origin, s.title, s.purpose, s.authorship,
                s.occurred_at AS source_occurred_at, s.occurred_end AS source_occurred_end,
+               s.subject, s.content_scope,
                c.occurred_at AS chunk_occurred_at,
                bm25(chunks_fts, 0.0, 5.0, 1.0) AS rank
         FROM chunks_fts
         JOIN chunks c ON c.id = chunks_fts.chunk_id
         JOIN sources s ON s.object_hash = c.object_hash AND s.deleted_at IS NULL
-        WHERE chunks_fts MATCH ? AND (? IS NULL OR s.purpose = ?)
+        WHERE chunks_fts MATCH ? AND s.is_current = 1 AND (? IS NULL OR s.purpose = ?)
         ORDER BY rank
         LIMIT 300
       `).all(match, filter.purpose ?? null, filter.purpose ?? null) as unknown as SearchRow[];
@@ -213,10 +303,11 @@ export class MemoryStore {
       SELECT c.id AS chunk_id, c.object_hash, c.start_line, c.end_line, c.content, c.heading_path,
              s.id AS source_id, s.origin, s.title, s.purpose, s.authorship,
              s.occurred_at AS source_occurred_at, s.occurred_end AS source_occurred_end,
+             s.subject, s.content_scope,
              c.occurred_at AS chunk_occurred_at, 0 AS rank
       FROM sources s
       JOIN chunks c ON c.object_hash = s.object_hash
-      WHERE s.deleted_at IS NULL AND instr(lower(c.content), lower(?)) > 0
+      WHERE s.deleted_at IS NULL AND s.is_current = 1 AND instr(lower(c.content), lower(?)) > 0
         AND (? IS NULL OR s.purpose = ?)
       LIMIT 200
     `).all(normalized, filter.purpose ?? null, filter.purpose ?? null) as unknown as SearchRow[];
@@ -226,10 +317,11 @@ export class MemoryStore {
       SELECT c.id AS chunk_id, c.object_hash, c.start_line, c.end_line, c.content, c.heading_path,
              s.id AS source_id, s.origin, s.title, s.purpose, s.authorship,
              s.occurred_at AS source_occurred_at, s.occurred_end AS source_occurred_end,
+             s.subject, s.content_scope,
              c.occurred_at AS chunk_occurred_at, 0 AS rank
       FROM sources s
       JOIN chunks c ON c.object_hash = s.object_hash AND c.ordinal = 0
-      WHERE s.deleted_at IS NULL AND instr(lower(s.title), lower(?)) > 0
+      WHERE s.deleted_at IS NULL AND s.is_current = 1 AND instr(lower(s.title), lower(?)) > 0
         AND (? IS NULL OR s.purpose = ?)
       LIMIT 200
     `).all(normalized, filter.purpose ?? null, filter.purpose ?? null) as unknown as SearchRow[];
@@ -256,6 +348,8 @@ export class MemoryStore {
           score: lexical.score,
           purpose: row.purpose,
           authorship: row.authorship,
+          subject: row.subject,
+          contentScope: row.content_scope,
           occurredAt: row.chunk_occurred_at
             ?? (row.source_occurred_at === row.source_occurred_end ? row.source_occurred_at : null),
         };
@@ -329,17 +423,33 @@ export class MemoryStore {
       content: rendered,
       purpose: "memory",
       authorship: context ? "mixed" : "user",
+      contentScope: "personal",
+      author: "user",
+      speaker: "user",
+      subject: "user",
       occurredAt,
       occurredEnd: occurredAt,
     });
   }
 
-  markSource(sourceId: string, purpose: SourcePurpose, authorship?: Authorship): SourceRecord {
-    const result = this.database.prepare("UPDATE sources SET purpose = ?, authorship = coalesce(?, authorship) WHERE id = ? AND deleted_at IS NULL")
-      .run(purpose, authorship ?? null, sourceId);
+  markSource(sourceId: string, purpose: SourcePurpose, authorship?: Authorship, contentScope?: ContentScope): SourceRecord {
+    const result = this.database.prepare(`
+      UPDATE sources
+      SET purpose = ?,
+          authorship = coalesce(?, authorship),
+          content_scope = coalesce(?, content_scope),
+          subject = CASE
+            WHEN ? = 'personal' AND coalesce(?, authorship) = 'user' THEN 'user'
+            WHEN ? IN ('sourced', 'fictional') THEN NULL
+            ELSE subject
+          END
+      WHERE id = ? AND deleted_at IS NULL
+    `).run(purpose, authorship ?? null, contentScope ?? null, contentScope ?? null, authorship ?? null, contentScope ?? null, sourceId);
     if (result.changes === 0) throw new MemoryError("SOURCE_NOT_FOUND", "资料不存在或已经移除。", false, "先运行 sources 检查资料 ID。");
     const row = this.database.prepare(`
-      SELECT id, kind, origin, title, object_hash, imported_at, deleted_at, purpose, authorship, occurred_at, occurred_end
+      SELECT id, kind, origin, title, object_hash, imported_at, deleted_at, purpose, authorship,
+             occurred_at, occurred_end, event_time_provenance, published_at, modified_at, observed_at,
+             author, speaker, subject, content_scope, external_id, connection_id, is_current, superseded_at
       FROM sources WHERE id = ?
     `).get(sourceId) as unknown as SourceRow;
     return this.mapSource(row);
@@ -353,7 +463,7 @@ export class MemoryStore {
         sum(CASE WHEN purpose = 'memory' AND occurred_at IS NOT NULL THEN 1 ELSE 0 END) AS dated_memories,
         min(CASE WHEN purpose = 'memory' THEN occurred_at END) AS earliest_memory,
         max(CASE WHEN purpose = 'memory' THEN coalesce(occurred_end, occurred_at) END) AS latest_memory
-      FROM sources WHERE deleted_at IS NULL
+      FROM sources WHERE deleted_at IS NULL AND is_current = 1
     `).get() as { memories: number | null; reference_count: number | null; dated_memories: number | null; earliest_memory: string | null; latest_memory: string | null };
     return {
       memories: Number(counts.memories ?? 0),
@@ -372,7 +482,9 @@ export class MemoryStore {
   readSource(sourceId: string, startLine = 1, endLine = 200): ReadSourceResult {
     const row = this.database.prepare(`
       SELECT s.id, s.kind, s.origin, s.title, s.object_hash, s.imported_at, s.deleted_at,
-             s.purpose, s.authorship, s.occurred_at, s.occurred_end, o.content
+             s.purpose, s.authorship, s.occurred_at, s.occurred_end, s.event_time_provenance,
+             s.published_at, s.modified_at, s.observed_at, s.author, s.speaker, s.subject,
+             s.content_scope, s.external_id, s.connection_id, s.is_current, s.superseded_at, o.content
       FROM sources s JOIN objects o ON o.hash = s.object_hash
       WHERE s.id = ? AND s.deleted_at IS NULL
     `).get(sourceId) as (SourceRow & { content: string }) | undefined;
@@ -392,22 +504,65 @@ export class MemoryStore {
   exportSnapshot(): ExportSnapshot {
     const rows = this.database.prepare(`
       SELECT s.id, s.kind, s.origin, s.title, s.object_hash, s.imported_at, s.deleted_at,
-             s.purpose, s.authorship, s.occurred_at, s.occurred_end, o.content
+             s.purpose, s.authorship, s.occurred_at, s.occurred_end, s.event_time_provenance,
+             s.published_at, s.modified_at, s.observed_at, s.author, s.speaker, s.subject,
+             s.content_scope, s.external_id, s.connection_id, s.is_current, s.superseded_at, o.content
       FROM sources s JOIN objects o ON o.hash = s.object_hash
-      WHERE s.deleted_at IS NULL ORDER BY s.imported_at, s.id
+      WHERE s.deleted_at IS NULL AND s.is_current = 1 ORDER BY s.imported_at, s.id
     `).all() as unknown as Array<SourceRow & { content: string }>;
     return {
-      version: 2,
+      version: 3,
       exportedAt: new Date().toISOString(),
       sources: rows.map((row) => ({ ...this.mapSource(row), content: row.content })),
     };
   }
 
   status(): StoreStatus {
-    const sources = this.count("SELECT count(*) AS count FROM sources WHERE deleted_at IS NULL");
-    const objects = this.count("SELECT count(DISTINCT object_hash) AS count FROM sources WHERE deleted_at IS NULL");
-    const chunks = this.count("SELECT count(*) AS count FROM chunks WHERE object_hash IN (SELECT object_hash FROM sources WHERE deleted_at IS NULL)");
+    const sources = this.count("SELECT count(*) AS count FROM sources WHERE deleted_at IS NULL AND is_current = 1");
+    const objects = this.count("SELECT count(DISTINCT object_hash) AS count FROM sources WHERE deleted_at IS NULL AND is_current = 1");
+    const chunks = this.count("SELECT count(*) AS count FROM chunks WHERE object_hash IN (SELECT object_hash FROM sources WHERE deleted_at IS NULL AND is_current = 1)");
     return { sources, objects, chunks };
+  }
+
+  createSyncJob(connectionId: string): SyncJobRecord {
+    const now = new Date().toISOString();
+    const job: SyncJobRecord = {
+      id: randomUUID(), connectionId, state: "pending", completed: 0, total: null,
+      imported: 0, unchanged: 0, skipped: 0, error: null, createdAt: now, updatedAt: now,
+    };
+    this.database.prepare(`
+      INSERT INTO sync_jobs(id, connection_id, state, completed, total, imported, unchanged, skipped, error, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(job.id, job.connectionId, job.state, job.completed, job.total, job.imported, job.unchanged, job.skipped, job.error, job.createdAt, job.updatedAt);
+    return job;
+  }
+
+  getActiveSyncJob(connectionId: string): SyncJobRecord | null {
+    const row = this.database.prepare(`
+      SELECT * FROM sync_jobs
+      WHERE connection_id = ? AND state IN ('pending', 'running')
+      ORDER BY created_at DESC LIMIT 1
+    `).get(connectionId);
+    return row ? mapSyncJob(row as Record<string, unknown>) : null;
+  }
+
+  updateSyncJob(id: string, patch: Partial<Pick<SyncJobRecord, "state" | "completed" | "total" | "imported" | "unchanged" | "skipped" | "error">>): SyncJobRecord {
+    const existing = this.getSyncJob(id);
+    if (!existing) throw new MemoryError("SYNC_JOB_NOT_FOUND", "找不到同步任务。", false, "运行 sync --start 创建新的同步任务。");
+    const next = { ...existing, ...patch, updatedAt: new Date().toISOString() };
+    this.database.prepare(`
+      UPDATE sync_jobs SET state = ?, completed = ?, total = ?, imported = ?, unchanged = ?, skipped = ?, error = ?, updated_at = ?
+      WHERE id = ?
+    `).run(next.state, next.completed, next.total, next.imported, next.unchanged, next.skipped, next.error, next.updatedAt, id);
+    return next;
+  }
+
+  getSyncJob(id?: string): SyncJobRecord | null {
+    const row = id
+      ? this.database.prepare("SELECT * FROM sync_jobs WHERE id = ?").get(id)
+      : this.database.prepare("SELECT * FROM sync_jobs ORDER BY created_at DESC LIMIT 1").get();
+    if (!row) return null;
+    return mapSyncJob(row as Record<string, unknown>);
   }
 
   close(): void {
@@ -431,19 +586,50 @@ export class MemoryStore {
       authorship: row.authorship,
       occurredAt: row.occurred_at,
       occurredEnd: row.occurred_end,
+      eventTimeProvenance: row.event_time_provenance,
+      publishedAt: row.published_at,
+      modifiedAt: row.modified_at,
+      observedAt: row.observed_at,
+      author: row.author,
+      speaker: row.speaker,
+      subject: row.subject,
+      contentScope: row.content_scope,
+      externalId: row.external_id,
+      connectionId: row.connection_id,
+      isCurrent: row.is_current === 1,
+      supersededAt: row.superseded_at,
     };
+  }
+
+  private supersedeOtherVersions(id: string, kind: SourceKind, origin: string, externalId: string | null, connectionId: string | null, at: string): void {
+    if (externalId && connectionId) {
+      this.database.prepare(`
+        UPDATE sources SET is_current = 0, superseded_at = ?
+        WHERE id <> ? AND deleted_at IS NULL AND is_current = 1 AND connection_id = ? AND external_id = ?
+      `).run(at, id, connectionId, externalId);
+      return;
+    }
+    this.database.prepare(`
+      UPDATE sources SET is_current = 0, superseded_at = ?
+      WHERE id <> ? AND deleted_at IS NULL AND is_current = 1 AND kind = ? AND origin = ?
+    `).run(at, id, kind, origin);
   }
 
 }
 
-function migrateToV3(database: DatabaseSync): void {
+function migrateToV4(database: DatabaseSync): void {
   const version = Number((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version);
   const sourceColumns = database.prepare("PRAGMA table_info(sources)").all() as Array<{ name: string }>;
   const chunkColumns = database.prepare("PRAGMA table_info(chunks)").all() as Array<{ name: string }>;
   const ftsExists = Boolean(database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chunks_fts'").get());
   const ftsColumns = ftsExists ? database.prepare("PRAGMA table_info(chunks_fts)").all() as Array<{ name: string }> : [];
-  const complete = version >= 3
-    && ["purpose", "authorship", "occurred_at", "occurred_end"].every((name) => sourceColumns.some((column) => column.name === name))
+  const requiredSourceColumns = [
+    "purpose", "authorship", "occurred_at", "occurred_end", "event_time_provenance", "published_at",
+    "modified_at", "observed_at", "author", "speaker", "subject", "content_scope", "external_id",
+    "connection_id", "is_current", "superseded_at",
+  ];
+  const complete = version >= 4
+    && requiredSourceColumns.every((name) => sourceColumns.some((column) => column.name === name))
     && ["heading_path", "occurred_at"].every((name) => chunkColumns.some((column) => column.name === name))
     && ftsColumns.some((column) => column.name === "heading_tokens");
   if (complete) return;
@@ -458,6 +644,26 @@ function migrateToV3(database: DatabaseSync): void {
     }
     if (!sourceColumns.some((column) => column.name === "occurred_at")) database.exec("ALTER TABLE sources ADD COLUMN occurred_at TEXT");
     if (!sourceColumns.some((column) => column.name === "occurred_end")) database.exec("ALTER TABLE sources ADD COLUMN occurred_end TEXT");
+    if (!sourceColumns.some((column) => column.name === "event_time_provenance")) {
+      database.exec("ALTER TABLE sources ADD COLUMN event_time_provenance TEXT NOT NULL DEFAULT 'unknown'");
+    }
+    if (!sourceColumns.some((column) => column.name === "published_at")) database.exec("ALTER TABLE sources ADD COLUMN published_at TEXT");
+    if (!sourceColumns.some((column) => column.name === "modified_at")) database.exec("ALTER TABLE sources ADD COLUMN modified_at TEXT");
+    if (!sourceColumns.some((column) => column.name === "observed_at")) {
+      database.exec("ALTER TABLE sources ADD COLUMN observed_at TEXT NOT NULL DEFAULT ''");
+    }
+    if (!sourceColumns.some((column) => column.name === "author")) database.exec("ALTER TABLE sources ADD COLUMN author TEXT");
+    if (!sourceColumns.some((column) => column.name === "speaker")) database.exec("ALTER TABLE sources ADD COLUMN speaker TEXT");
+    if (!sourceColumns.some((column) => column.name === "subject")) database.exec("ALTER TABLE sources ADD COLUMN subject TEXT");
+    if (!sourceColumns.some((column) => column.name === "content_scope")) {
+      database.exec("ALTER TABLE sources ADD COLUMN content_scope TEXT NOT NULL DEFAULT 'unknown'");
+    }
+    if (!sourceColumns.some((column) => column.name === "external_id")) database.exec("ALTER TABLE sources ADD COLUMN external_id TEXT");
+    if (!sourceColumns.some((column) => column.name === "connection_id")) database.exec("ALTER TABLE sources ADD COLUMN connection_id TEXT");
+    if (!sourceColumns.some((column) => column.name === "is_current")) {
+      database.exec("ALTER TABLE sources ADD COLUMN is_current INTEGER NOT NULL DEFAULT 1");
+    }
+    if (!sourceColumns.some((column) => column.name === "superseded_at")) database.exec("ALTER TABLE sources ADD COLUMN superseded_at TEXT");
     if (!chunkColumns.some((column) => column.name === "heading_path")) {
       database.exec("ALTER TABLE chunks ADD COLUMN heading_path TEXT NOT NULL DEFAULT '[]'");
     }
@@ -492,11 +698,64 @@ function migrateToV3(database: DatabaseSync): void {
         updateDate.run(range?.start ?? null, range?.end ?? null, source.id);
       }
     }
-    database.exec("PRAGMA user_version = 3; COMMIT");
+    database.exec(`
+      UPDATE sources
+      SET observed_at = CASE WHEN observed_at = '' THEN imported_at ELSE observed_at END,
+          event_time_provenance = CASE
+            WHEN event_time_provenance = 'unknown' AND occurred_at IS NOT NULL THEN 'inferred'
+            ELSE event_time_provenance
+          END,
+          content_scope = CASE
+            WHEN content_scope = 'unknown' AND purpose = 'memory' AND authorship = 'user' THEN 'personal'
+            ELSE content_scope
+          END,
+          author = CASE WHEN author IS NULL AND authorship = 'user' THEN 'user' ELSE author END,
+          subject = CASE
+            WHEN subject IS NULL AND purpose = 'memory' AND authorship = 'user' THEN 'user'
+            ELSE subject
+          END
+    `);
+    database.exec("CREATE INDEX IF NOT EXISTS sources_current_origin ON sources(kind, origin, is_current)");
+    database.exec("CREATE INDEX IF NOT EXISTS sources_connection_external ON sources(connection_id, external_id, is_current)");
+    database.exec("PRAGMA user_version = 4; COMMIT");
   } catch (error) {
     database.exec("ROLLBACK");
     throw error;
   }
+}
+
+function normalizeOptionalTimestamp(value: string | null | undefined): string | null {
+  if (value === null || value === undefined || value.trim() === "") return null;
+  const trimmed = value.trim();
+  const normalizedDate = normalizeDate(trimmed);
+  if (normalizedDate && /^\d{4}(?:-\d{2})?(?:-\d{2})?$/.test(trimmed)) return normalizedDate.date;
+  const timestamp = new Date(trimmed);
+  if (Number.isNaN(timestamp.getTime())) {
+    throw new MemoryError("INVALID_DATE", `无法识别时间：${value}`, false, "使用 ISO 8601 时间或 YYYY-MM-DD 日期。");
+  }
+  return timestamp.toISOString();
+}
+
+function normalizeOptionalText(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const normalized = value.normalize("NFKC").replace(/\s+/g, " ").trim();
+  return normalized || null;
+}
+
+function mapSyncJob(row: Record<string, unknown>): SyncJobRecord {
+  return {
+    id: String(row.id),
+    connectionId: String(row.connection_id),
+    state: String(row.state) as SyncJobState,
+    completed: Number(row.completed),
+    total: row.total === null ? null : Number(row.total),
+    imported: Number(row.imported),
+    unchanged: Number(row.unchanged),
+    skipped: Number(row.skipped),
+    error: row.error === null ? null : String(row.error),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
 }
 
 function normalizeOptionalDate(value: string | null | undefined): string | null {

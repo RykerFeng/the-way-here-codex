@@ -1,6 +1,6 @@
 {
   "name": "the-way-here-codex",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -9,6 +9,8 @@
   },
   "files": [
     "dist",
+    "skills",
+    "START.md",
     "LOAD.md",
     "README.md",
     "LICENSE"

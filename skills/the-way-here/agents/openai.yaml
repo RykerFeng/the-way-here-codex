@@ -1,0 +1,8 @@
+interface:
+  display_name: "The Way Here"
+  short_description: "把你选择的来时路带进当前任务"
+  default_prompt: "Use $the-way-here to connect my personal context to this task."
+
+policy:
+  allow_implicit_invocation: false
+
