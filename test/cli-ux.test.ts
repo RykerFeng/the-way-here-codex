@@ -101,7 +101,7 @@ test("version and command help do not require a space", async () => {
   const version = await run(["version"]);
   const help = await run(["help", "query"]);
 
-  assert.equal(version.version, "0.4.0");
+  assert.equal(version.version, "0.4.1");
   assert.match(help.usage, /queries-json/);
   assert.match(help.example, /query --space/);
 });

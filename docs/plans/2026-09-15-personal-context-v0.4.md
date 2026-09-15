@@ -22,7 +22,7 @@
 - [x] 普通聊天不自动保存；只有明确请求才调用 `remember`。
 - [x] 虚构和引用范围不能支撑个人回忆；归属未知时强制拒绝断言。
 - [x] 重写 README 和 `START.md`，把故事、最短安装路径和隔离边界放在前面。
-- [x] Release 同时生成单文件 CLI、SHA-256、ZIP、Skill 和启动文档。
+- [x] Release 同时生成单文件 CLI、SHA-256、ZIP、Skill 和启动文档；resolver 使用 Release 直链，不消耗 GitHub API 限额。
 
 ## Case 覆盖
 
