@@ -16,6 +16,7 @@ const files = [
   ["LOAD.md", "LOAD.md"],
   ["skills/the-way-here/SKILL.md", "skills/the-way-here/SKILL.md"],
   ["skills/the-way-here/agents/openai.yaml", "skills/the-way-here/agents/openai.yaml"],
+  ["skills/the-way-here/references/narrative-voice.md", "skills/the-way-here/references/narrative-voice.md"],
   ["skills/the-way-here/scripts/resolve-cli.mjs", "skills/the-way-here/scripts/resolve-cli.mjs"],
   ["README.md", "README.md"],
   ["LICENSE", "LICENSE"],
