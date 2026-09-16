@@ -38,6 +38,8 @@ If a relevant source is `unknown`, present it as unconfirmed. When the user clea
 
 Separate current user statements, source facts, and your interpretation. Cite the source title, event date or “日期未知”, lines, and origin. If evidence is insufficient, say so.
 
+After recall returns and before writing the user-facing answer, read `references/narrative-voice.md`. Apply it only to this recall answer; it does not change global Codex style or any other task.
+
 ## Remember
 
 Ordinary conversation is never saved automatically. Run `remember` only after the user clearly asks to save something. Store the user's confirmed words or decision as personal/user evidence; keep Codex-written context separate.
